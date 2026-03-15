@@ -1,6 +1,10 @@
 # TradeAgent
 
+“We built an AI-native hedge fund simulator that thinks like a team, acts like a fund, and explains itself like a product.”
+
 TradeAgent is an AI-native hedge fund simulator for live decision making, portfolio construction, and real-time investment intelligence.
+
+“The problem is not lack of ideas. The problem is turning ideas into coordinated, risk-aware portfolio decisions fast enough to matter.”
 
 Instead of asking one model to pick a stock, TradeAgent runs an entire fund workflow:
 
@@ -15,23 +19,37 @@ It combines a multi-agent trading committee, a portfolio-construction overlay, a
 
 ## 30-Second Pitch
 
-TradeAgent is a strong hackathon project because it shows a complete AI product, not just a single model output.
+TradeAgent stands out because it does not present AI as a single answer.
 
-It has:
+It presents AI as an operating system for investment decisions.
 
-- `clear AI depth`
-  Multiple agents with different mandates and visible reasoning
+That matters because the product shows the full workflow that real teams actually care about:
 
-- `real-time product behavior`
-  Streaming updates, committee votes, risk alerts, scenario shocks, and live benchmark comparisons
+- `idea generation`
+  Specialized agents look at the same market through different lenses instead of forcing one model to do everything.
 
-- `real-world finance structure`
-  Research, risk, portfolio construction, factor exposures, treasury allocation, and backtesting
+- `decision quality`
+  Large trades go through committee voting, so the system can challenge itself before putting capital at risk.
 
-- `a demo that tells a story`
-  The user can inject a market event, watch the fund react, and understand why the system changed the book
+- `risk awareness`
+  Position limits, stop-losses, theme caps, kill-switch logic, and portfolio construction are built into the core loop.
 
-This gives judges something that is easy to follow in a few minutes while still feeling substantially more serious than a typical chatbot wrapper.
+- `explainability`
+  The dashboard makes every major action visible through reasoning streams, research briefs, risk events, factor exposures, and benchmark comparisons.
+
+- `evidence`
+  The backtest lab gives the system a way to be judged on scenario performance instead of just one flashy run.
+
+What makes this compelling in a demo is that the audience can watch the entire chain happen live:
+
+1. a market event is injected
+2. the research desk updates the regime
+3. agents propose trades
+4. the committee votes
+5. the portfolio construction layer trims crowding
+6. the book is compared against benchmarks and backtests
+
+That makes TradeAgent feel less like a prototype that generates outputs and more like a product that manages decisions.
 
 ## Why This Could Be Real
 
