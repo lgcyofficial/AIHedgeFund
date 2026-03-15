@@ -1,8 +1,6 @@
 # TradeAgent
 
-We built an AI-native hedge fund simulator that thinks like a team, acts like a fund, and explains itself like a product.
-
-TradeAgent is an AI-native hedge fund simulator for live decision making, portfolio construction, and real-time investment intelligence.
+We built an AI-native hedge fund simulator that thinks like a team, acts like a fund, and explains itself like a product. TradeAgent brings together multiple specialized AI agents, live market and news analysis, committee voting, risk controls, portfolio construction, factor and theme exposure modeling, benchmark tracking, and backtesting inside one real-time command deck. Instead of generating a single stock pick, the system shows how investment decisions are formed, challenged, risk-managed, and evaluated, making the full workflow visible and understandable. The result is a product that feels closer to a real investment operating system than a typical AI demo, with clear value for research teams, portfolio managers, and anyone who needs faster, more transparent decision support.
 
 The problem is not lack of ideas. The problem is turning ideas into coordinated, risk-aware portfolio decisions fast enough to matter.
 
@@ -17,19 +15,30 @@ Instead of asking one model to pick a stock, TradeAgent runs an entire fund work
 
 It combines a multi-agent trading committee, a portfolio-construction overlay, a research desk, factor and theme exposure models, benchmark tracking, and a backtest lab inside one command deck.
 
-## Why This Lands Immediately
+## Why It Lands
 
 TradeAgent is compelling because it treats AI as an operating system for investment decisions, not as a single recommendation engine.
 
-The product captures the full workflow that real teams care about. Specialized agents generate ideas from different perspectives. Large trades are challenged through committee voting before capital is deployed. Risk controls and portfolio-construction rules shape what actually gets executed. A research desk interprets the regime, and the dashboard makes the entire process visible through reasoning, exposures, benchmarks, and backtests.
+The product captures the workflow that real teams actually care about:
 
-That combination matters because it turns AI output into something structured, auditable, and useful. Instead of showing one answer, TradeAgent shows how a decision is formed, how it is challenged, how it is risk-managed, and how it is evaluated afterward.
+- `idea generation`
+  Specialized agents look at the same market from different perspectives instead of forcing one model to do everything.
 
-It also demos extremely well. A user can inject a market event, watch the research brief update, see agents propose trades, observe the committee vote, and then watch the portfolio-construction layer rebalance the book in real time. That sequence makes the product easy to understand quickly while still showing real technical depth.
+- `decision quality`
+  Large trades are challenged through committee voting before capital is deployed.
 
-The result is a system that feels less like a prototype generating outputs and more like a product managing decisions.
+- `risk awareness`
+  Position limits, stop-losses, theme caps, kill-switch logic, and portfolio construction shape what actually gets executed.
 
-## Why This Could Be Real
+- `explainability`
+  The dashboard makes the full chain visible through reasoning streams, research briefs, risk events, factor exposures, benchmarks, and backtests.
+
+- `evidence`
+  The backtest lab gives the system a way to be judged on scenario performance instead of one flashy run.
+
+It also presents extremely well. A user can inject a market event, watch the research brief update, see agents propose trades, observe the committee vote, and then watch the portfolio-construction layer rebalance the book in real time. That sequence makes the product easy to understand quickly while still showing real technical depth.
+
+## Why It Could Be Real
 
 TradeAgent is built around workflows that already exist inside real investment teams:
 
@@ -39,9 +48,7 @@ TradeAgent is built around workflows that already exist inside real investment t
 - `investment committees` challenge large decisions
 - `performance teams` compare results to benchmarks and historical regimes
 
-The product makes that workflow visible and interactive.
-
-That is why the idea feels tangible beyond a hackathon:
+That is what makes the idea tangible beyond a hackathon:
 
 - it can be used as an internal PM/research/risk prototype
 - it can serve as a training and simulation tool for discretionary teams
@@ -50,21 +57,21 @@ That is why the idea feels tangible beyond a hackathon:
 
 ## Why It Stands Out
 
-Most AI trading demos stop at “the model picked a stock.”
+Most AI trading demos stop at a single model output.
 
 TradeAgent goes further:
 
-- `decision layer`
-  Multiple specialized agents reason about the same market from different angles
+- `multiple specialized agents`
+  The system reasons like a team instead of collapsing everything into one prompt.
 
-- `control layer`
-  Risk and portfolio construction actively shape what gets executed
+- `visible governance`
+  Committee voting and risk controls make the decision process inspectable.
 
-- `explanation layer`
-  The UI shows the chain of reasoning, votes, trims, benchmarks, factors, and research context
+- `portfolio-level intelligence`
+  The system manages crowding, factor exposure, and thematic concentration instead of evaluating trades in isolation.
 
-- `evaluation layer`
-  The system can be judged against passive benchmarks and scenario backtests, not just a single flashy run
+- `real evaluation`
+  Performance is compared against passive benchmarks and scenario backtests, not just one impressive run.
 
 The result is a system that looks like a product someone could actually use to inspect, challenge, and improve investment decisions.
 
@@ -81,7 +88,7 @@ TradeAgent is a simulated autonomous fund with three layers:
 3. `Intelligence + Presentation Layer`
    A live dashboard shows reasoning, benchmark performance, theme and factor exposures, research briefs, backtest results, risk alerts, and executed trades.
 
-## What Makes It Valuable
+## Why It Is Valuable
 
 TradeAgent is valuable because it shows what a real institutional workflow needs:
 
@@ -98,7 +105,7 @@ That makes the product useful as:
 - an internal PM/research/risk prototype
 - a foundation for a more serious autonomous investing platform
 
-It also lands well in a hackathon setting because it scores on the things judges usually reward:
+It also works well in a hackathon setting because it scores on the things judges usually reward:
 
 - `Originality`
   Multi-agent fund orchestration is more ambitious and differentiated than a single chatbot wrapper.
@@ -112,7 +119,7 @@ It also lands well in a hackathon setting because it scores on the things judges
 - `Usefulness`
   Even as a simulation, it models real workflows from hedge funds, trading desks, and portfolio management.
 
-## Feature Comparison
+## Why It Feels More Complete Than Typical AI Finance Demos
 
 What many AI finance demos show:
 
