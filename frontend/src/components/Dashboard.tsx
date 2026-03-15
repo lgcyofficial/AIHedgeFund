@@ -5,10 +5,21 @@ import { useDeferredValue, useMemo, useState } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { ActivityEvent, AgentAllocation, MarketState, NewsItem, ProjectionPoint } from "../types";
 
-const SOCKET_URL = "ws://127.0.0.1:8000/ws/stream";
 const SESSION_DURATION_SECONDS = 60;
 const PANEL =
   "rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(14,18,24,0.98),rgba(7,10,15,0.98))] shadow-[0_22px_70px_rgba(0,0,0,0.38)] backdrop-blur";
+
+function getSocketUrl() {
+  if (typeof window === "undefined") {
+    return "ws://127.0.0.1:8000/ws/stream";
+  }
+  const configured = process.env.NEXT_PUBLIC_WS_URL;
+  if (configured) {
+    return configured;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.hostname}:8000/ws/stream`;
+}
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
@@ -37,6 +48,16 @@ function formatPercent(value: number) {
 
 function formatShortTime(value: string) {
   return value?.slice(0, 5) || "--:--";
+}
+
+function normalizeCapitalInput(value: string) {
+  const sanitized = value.replace(/[^\d.]/g, "");
+  const [integerPartRaw, decimalPart] = sanitized.split(".", 2);
+  const integerPart = integerPartRaw.replace(/^0+(?=\d)/, "");
+  if (sanitized.includes(".")) {
+    return `${integerPart || "0"}.${decimalPart ?? ""}`;
+  }
+  return integerPart;
 }
 
 function statusClasses(status: AgentAllocation["status"]) {
@@ -99,17 +120,29 @@ function PerformanceChart({ history }: { history: ProjectionPoint[] }) {
   const latest = history[history.length - 1];
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
-      {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-        const y = padding + ratio * (height - padding * 2);
-        return <line key={ratio} x1={padding} x2={width - padding} y1={y} y2={y} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 10" />;
-      })}
-      <line x1={padding} x2={width - padding} y1={getY(0)} y2={getY(0)} stroke="rgba(255,255,255,0.18)" />
-      <polyline fill="none" stroke="#fb923c" strokeWidth="3.2" points={actualPath} />
-      <polyline fill="none" stroke="#2dd4bf" strokeWidth="2.9" strokeDasharray="8 8" points={projectedPath} />
-      <circle cx={getX(history.length - 1)} cy={getY(latest.actual_pnl)} r="4.5" fill="#fb923c" />
-      <circle cx={getX(history.length - 1)} cy={getY(latest.projected_pnl)} r="4.5" fill="#2dd4bf" />
-    </svg>
+    <div className="relative h-full w-full">
+      <div className="pointer-events-none absolute left-3 top-2 z-10 flex gap-3 rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200 backdrop-blur">
+        <span className="inline-flex items-center gap-2">
+          <span className="h-[3px] w-6 rounded-full bg-[#fb923c]" />
+          P&amp;L
+        </span>
+        <span className="inline-flex items-center gap-2">
+          <span className="h-[3px] w-6 rounded-full border-t-[3px] border-dashed border-[#2dd4bf]" />
+          Projected P&amp;L
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+          const y = padding + ratio * (height - padding * 2);
+          return <line key={ratio} x1={padding} x2={width - padding} y1={y} y2={y} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 10" />;
+        })}
+        <line x1={padding} x2={width - padding} y1={getY(0)} y2={getY(0)} stroke="rgba(255,255,255,0.18)" />
+        <polyline fill="none" stroke="#fb923c" strokeWidth="3.2" points={actualPath} />
+        <polyline fill="none" stroke="#2dd4bf" strokeWidth="2.9" strokeDasharray="8 8" points={projectedPath} />
+        <circle cx={getX(history.length - 1)} cy={getY(latest.actual_pnl)} r="4.5" fill="#fb923c" />
+        <circle cx={getX(history.length - 1)} cy={getY(latest.projected_pnl)} r="4.5" fill="#2dd4bf" />
+      </svg>
+    </div>
   );
 }
 
@@ -310,7 +343,7 @@ function NewsPanel({ news, marketData }: { news: NewsItem[]; marketData: MarketS
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-[0.34em] text-orange-300/80">Live News Desk</div>
-          <h2 className="mt-2 text-xl font-semibold text-slate-50">Gemini-ranked market headlines</h2>
+          <h2 className="mt-2 text-xl font-semibold text-slate-50">Market headlines</h2>
         </div>
         <div className="rounded-full bg-teal-400/[0.1] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-teal-100">Live tape</div>
       </div>
@@ -388,6 +421,7 @@ function NewsPanel({ news, marketData }: { news: NewsItem[]; marketData: MarketS
 }
 
 export default function Dashboard() {
+  const socketUrl = useMemo(() => getSocketUrl(), []);
   const {
     isConnected,
     portfolio,
@@ -405,9 +439,9 @@ export default function Dashboard() {
     applyScenario,
     setOverride,
     setAgentPaused,
-  } = useWebSocket(SOCKET_URL);
+  } = useWebSocket(socketUrl);
 
-  const [capital, setCapital] = useState(10000);
+  const [capitalInput, setCapitalInput] = useState("10000");
   const [risk, setRisk] = useState("medium");
   const [selectedScenario, setSelectedScenario] = useState("");
   const [error, setError] = useState("");
@@ -415,6 +449,7 @@ export default function Dashboard() {
   const deferredActivity = useDeferredValue(activity);
   const deferredNews = useDeferredValue(news);
   const activeScenario = selectedScenario || scenarios[0]?.id || "";
+  const capital = Number(capitalInput) || 0;
   const navValue = portfolio?.total_value ?? capital;
   const totalReturn = portfolio?.total_return_pct ?? 0;
 
@@ -481,9 +516,10 @@ export default function Dashboard() {
             <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2">
               <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Capital</div>
               <input
-                type="number"
-                value={capital}
-                onChange={(event) => setCapital(Number(event.target.value))}
+                type="text"
+                inputMode="decimal"
+                value={capitalInput}
+                onChange={(event) => setCapitalInput(normalizeCapitalInput(event.target.value))}
                 className="mt-1 w-full bg-transparent text-[11px] font-semibold outline-none"
               />
             </label>
@@ -499,7 +535,7 @@ export default function Dashboard() {
               <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Run Time</div>
               <div className="mt-1 text-[11px] font-semibold text-slate-100">{SESSION_DURATION_SECONDS}s fixed</div>
             </div>
-            <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2 sm:col-span-2 xl:col-span-1">
+            <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2 sm:col-span-2 lg:col-span-1">
               <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Scenario</div>
               <select
                 value={activeScenario}
@@ -539,8 +575,8 @@ export default function Dashboard() {
           </div>
         </header>
 
-        <main className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[1.15fr,0.95fr,1.1fr]">
-          <div className="grid min-h-0 gap-3 xl:grid-rows-[1.05fr,0.95fr]">
+        <main className="grid min-h-0 flex-1 gap-3 md:grid-cols-[minmax(680px,1.45fr),minmax(0,1fr)]">
+          <div className="grid min-h-0 gap-3 lg:grid-rows-[1.05fr,0.95fr]">
             <PnlPanel
               projectionHistory={projectionHistory}
               latestProjection={latestProjection}
@@ -549,8 +585,10 @@ export default function Dashboard() {
             />
             <AllocationTable allocations={allocations} pausedAgents={controlState.paused_agents} onToggleAgent={setAgentPaused} />
           </div>
-          <ConversationPanel activity={conversationFeed} coordination={coordination} />
-          <NewsPanel news={deferredNews} marketData={marketData as MarketState} />
+          <div className="grid min-h-0 gap-3 md:grid-cols-2">
+            <ConversationPanel activity={conversationFeed} coordination={coordination} />
+            <NewsPanel news={deferredNews} marketData={marketData as MarketState} />
+          </div>
         </main>
       </div>
     </div>

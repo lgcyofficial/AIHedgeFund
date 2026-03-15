@@ -1,4 +1,5 @@
 import asyncio
+import os
 import random
 import re
 import time
@@ -21,6 +22,10 @@ from models import (
 )
 from news_service import LiveNewsService
 from websocket_server import manager
+
+TICK_DELAY_SECONDS = float(os.getenv("TRADING_TICK_DELAY_SECONDS", "0.5"))
+TRADE_IMPACT_MIN_PCT = float(os.getenv("TRADE_IMPACT_MIN_PCT", "0.0025"))
+TRADE_IMPACT_MAX_PCT = float(os.getenv("TRADE_IMPACT_MAX_PCT", "0.012"))
 
 RISK_PROFILES = {
     "low": {
@@ -185,16 +190,77 @@ class MarketSim:
         self.latest_agent_signals: Dict[str, Dict[str, Any]] = {}
         self.last_summary = None
 
-    def start(self, capital: float, risk: str = "medium"):
+    def _get_initial_agent_weights(self, scenario_id: Optional[str] = None) -> Dict[str, float]:
+        if self.risk == "low":
+            weights = {"Momentum": 0.2, "News": 0.22, "Macro": 0.38, "Volatility": 0.2}
+        elif self.risk == "high":
+            weights = {"Momentum": 0.3, "News": 0.24, "Macro": 0.16, "Volatility": 0.3}
+        else:
+            weights = {"Momentum": 0.27, "News": 0.25, "Macro": 0.23, "Volatility": 0.25}
+
+        scenario_biases = {
+            "fed-pivot": {"Momentum": 0.03, "News": 0.02, "Macro": 0.01, "Volatility": -0.06},
+            "nvda-earnings-beat": {"Momentum": 0.05, "News": 0.05, "Macro": -0.04, "Volatility": -0.06},
+            "crypto-flush": {"Momentum": -0.05, "News": -0.02, "Macro": 0.02, "Volatility": 0.05},
+            "oil-shock": {"Momentum": -0.04, "News": -0.01, "Macro": 0.03, "Volatility": 0.02},
+        }
+        if scenario_id in scenario_biases:
+            for agent_name, bias in scenario_biases[scenario_id].items():
+                weights[agent_name] = max(0.08, weights[agent_name] + bias)
+
+        total = sum(weights.values()) or 1.0
+        return {agent_name: weight / total for agent_name, weight in weights.items()}
+
+    def start(self, capital: float, risk: str = "medium", scenario_id: Optional[str] = None):
         self.reset()
         self.initial_cash = capital
         self.risk = risk if risk in RISK_PROFILES else "medium"
-        split = capital / len(self.agent_names)
-        for agent_name in self.agent_names:
-            self.agent_funds[agent_name] = split
-            self.agent_initial[agent_name] = split
+        self.active_scenario = scenario_id if scenario_id in SCENARIOS else None
+        weights = self._get_initial_agent_weights(self.active_scenario)
+        allocated_total = 0.0
+        for index, agent_name in enumerate(self.agent_names):
+            if index == len(self.agent_names) - 1:
+                amount = round(capital - allocated_total, 2)
+            else:
+                amount = round(capital * weights.get(agent_name, 0.0), 2)
+                allocated_total += amount
+            self.agent_funds[agent_name] = amount
+            self.agent_initial[agent_name] = amount
+        if self.active_scenario:
+            self.apply_scenario(self.active_scenario)
         self.session_active = True
         self.capture_projection()
+
+    def get_dynamic_allocation_shift(self, agent_stats: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        scores: Dict[str, float] = {}
+        for agent_name in self.agent_names:
+            stats = agent_stats.get(agent_name, {})
+            signal = self.latest_agent_signals.get(agent_name, {})
+            confidence = float(signal.get("confidence", 0.45) or 0.45)
+            action = signal.get("action", "HOLD")
+            signal_bonus = confidence if action != "HOLD" else confidence * 0.35
+            pnl_score = max(-0.5, min((stats.get("realized_pnl", 0.0) + stats.get("unrealized_pnl", 0.0)) / max(self.initial_cash, 1.0) * 18, 1.5))
+            scores[agent_name] = max(0.1, 1.0 + signal_bonus + pnl_score)
+
+        leader = max(scores, key=scores.get)
+        laggard = min(scores, key=scores.get)
+        if leader == laggard:
+            return {"star_agent": None, "lagging_agent": None, "shift_amount": 0.0, "reasoning": "Signal allocation is unchanged."}
+
+        spread = scores[leader] - scores[laggard]
+        if spread < 0.08:
+            return {"star_agent": None, "lagging_agent": None, "shift_amount": 0.0, "reasoning": "Signal allocation is unchanged."}
+
+        shift_amount = round(min(max(self.initial_cash * spread * 0.01, 100), self.agent_funds[laggard] * 0.12), 2)
+        if shift_amount <= 0:
+            return {"star_agent": None, "lagging_agent": None, "shift_amount": 0.0, "reasoning": "Signal allocation is unchanged."}
+
+        return {
+            "star_agent": leader,
+            "lagging_agent": laggard,
+            "shift_amount": shift_amount,
+            "reasoning": f"Signal allocation moved ${shift_amount:.0f} from {laggard} to {leader} on conviction and live edge.",
+        }
 
     def get_scenarios(self) -> List[Dict[str, Any]]:
         return [_dump_model(scenario) for scenario in SCENARIOS.values()]
@@ -634,6 +700,31 @@ class MarketSim:
         self.agent_trade_results[agent_name].append(realized_pnl)
         return self._build_trade(agent_name, decision, sell_quantity, proceeds, price, realized_pnl, committee_approved, risk_flag)
 
+    def apply_trade_impact(self, trade: Trade):
+        asset = trade.asset
+        if asset not in self.prices:
+            return
+
+        previous_tick_price = self.previous_prices.get(asset, self.prices[asset])
+        current_price = self.prices[asset]
+        direction = 1.0 if trade.action == "BUY" else -1.0
+        confidence = float(trade.confidence or 0.5)
+        size_ratio = trade.amount / max(self.initial_cash, 1.0)
+        impact = 0.0018 + confidence * 0.006 + min(size_ratio, 0.18) * 0.05 + random.uniform(0.0, 0.0015)
+        impact = _clamp(impact, TRADE_IMPACT_MIN_PCT, TRADE_IMPACT_MAX_PCT)
+        repriced = max(current_price * (1 + direction * impact), 1.0)
+
+        self.prices[asset] = round(repriced, 2)
+        changes = dict(self.latest_market_data.get("changes", {}))
+        prices = dict(self.latest_market_data.get("prices", self.prices))
+        prices[asset] = self.prices[asset]
+        changes[asset] = round(_pct(self.prices[asset], previous_tick_price), 4)
+        self.latest_market_data = {
+            **self.latest_market_data,
+            "prices": prices,
+            "changes": changes,
+        }
+
     def enforce_stop_losses(self) -> List[Trade]:
         risk_profile = RISK_PROFILES[self.risk]
         forced_trades = []
@@ -774,6 +865,13 @@ async def _broadcast_core_state():
     await manager.broadcast({"type": "control_state", "data": sim.get_session_state()})
 
 
+async def _broadcast_live_state():
+    projection = sim.capture_projection()
+    await manager.broadcast({"type": "portfolio_update", "data": _dump_model(sim.get_portfolio_snapshot())})
+    await manager.broadcast({"type": "allocation_update", "data": sim.get_agent_allocations()})
+    await manager.broadcast({"type": "projection_update", "data": projection})
+
+
 async def trading_loop(duration: int):
     sim.session_active = True
     end_time = time.time() + duration
@@ -783,6 +881,7 @@ async def trading_loop(duration: int):
     while time.time() < end_time and sim.session_active:
         sim.tick += 1
         markets = sim.update_markets()
+        await _broadcast_live_state()
         live_news = await asyncio.to_thread(live_news_service.fetch, sim.prices)
         news = sim.get_news(live_news)
 
@@ -803,6 +902,7 @@ async def trading_loop(duration: int):
         for forced_trade in forced_trades:
             sim.trades.append(forced_trade)
             await manager.broadcast({"type": "trade_execution", "data": _dump_model(forced_trade)})
+            await _broadcast_live_state()
             activity = sim.push_activity(
                 kind="risk",
                 headline="Stop-loss exit",
@@ -846,8 +946,14 @@ async def trading_loop(duration: int):
         )
 
         agent_performance = {}
-        for agent_name, agent_obj in agents.items():
-            decision = await agent_obj.analyze(markets, news, portfolio_state, sim.agent_funds[agent_name])
+        agent_names = list(agents.keys())
+        raw_decisions = await asyncio.gather(
+            *[
+                agents[agent_name].analyze(markets, news, portfolio_state, sim.agent_funds[agent_name])
+                for agent_name in agent_names
+            ]
+        )
+        for agent_name, decision in zip(agent_names, raw_decisions):
             decision, risk_messages = sim._risk_adjust_decision(agent_name, decision)
             sim.latest_agent_signals[agent_name] = dict(decision)
             committee_approved = True
@@ -877,12 +983,11 @@ async def trading_loop(duration: int):
             )
 
             if requires_vote:
-                votes = []
-                for judge_name, judge_obj in agents.items():
-                    if judge_name == agent_name:
-                        continue
-                    vote_result = await judge_obj.judge(decision, news)
-                    votes.append(vote_result)
+                judge_names = [judge_name for judge_name in agent_names if judge_name != agent_name]
+                votes = await asyncio.gather(
+                    *[agents[judge_name].judge(decision, news) for judge_name in judge_names]
+                )
+                for judge_name, vote_result in zip(judge_names, votes):
                     relay_activity = sim.push_activity(
                         kind="relay",
                         headline="{0} to {1}".format(judge_name, agent_name),
@@ -917,10 +1022,7 @@ async def trading_loop(duration: int):
                                     "vote": vote.get("vote"),
                                     "reasoning": vote.get("reasoning"),
                                 }
-                                for judge_name, vote in zip(
-                                    [name for name in agents if name != agent_name],
-                                    votes,
-                                )
+                                for judge_name, vote in zip(judge_names, votes)
                             ],
                             "consensus": round(consensus, 2),
                             "approved": committee_approved,
@@ -978,8 +1080,11 @@ async def trading_loop(duration: int):
 
             trade = sim.update_portfolio(agent_name, decision, committee_approved)
             if trade is not None:
+                sim.apply_trade_impact(trade)
                 sim.trades.append(trade)
+                await manager.broadcast({"type": "market_update", "data": sim.latest_market_data})
                 await manager.broadcast({"type": "trade_execution", "data": _dump_model(trade)})
+                await _broadcast_live_state()
                 trade_activity = sim.push_activity(
                     kind="trade",
                     headline="{0} executed {1} {2}".format(agent_name, trade.action, trade.asset),
@@ -1009,36 +1114,43 @@ async def trading_loop(duration: int):
                 ),
             }
 
-        reallocation = await governor.reallocate(agent_performance)
-        star_agent = reallocation.get("star_agent")
-        lagging_agent = reallocation.get("lagging_agent")
-        shift_amount = float(reallocation.get("shift_amount", 0) or 0)
-        if star_agent and lagging_agent and shift_amount > 0:
+        treasury_moves = [
+            await governor.reallocate(agent_performance),
+            sim.get_dynamic_allocation_shift(agent_performance),
+        ]
+        for reallocation in treasury_moves:
+            star_agent = reallocation.get("star_agent")
+            lagging_agent = reallocation.get("lagging_agent")
+            shift_amount = float(reallocation.get("shift_amount", 0) or 0)
+            if not (star_agent and lagging_agent and shift_amount > 0):
+                continue
             shift_amount = min(shift_amount, sim.agent_funds[lagging_agent])
-            if shift_amount > 0:
-                sim.agent_funds[lagging_agent] -= shift_amount
-                sim.agent_funds[star_agent] += shift_amount
-                treasury_activity = sim.push_activity(
-                    kind="treasury",
-                    headline="Treasury reallocation",
-                    message=reallocation.get("reasoning"),
-                    tone="positive",
-                    agent=star_agent,
-                    target_agent=lagging_agent,
-                    amount=shift_amount,
-                )
-                await manager.broadcast({"type": "activity_event", "data": treasury_activity})
-                await manager.broadcast(
-                    {
-                        "type": "treasury_update",
-                        "data": {
-                            "message": reallocation.get("reasoning"),
-                            "allocations": sim.get_allocations(),
-                            "star": star_agent,
-                            "lagging": lagging_agent,
-                        },
-                    }
-                )
+            if shift_amount <= 0:
+                continue
+            sim.agent_funds[lagging_agent] -= shift_amount
+            sim.agent_funds[star_agent] += shift_amount
+            treasury_activity = sim.push_activity(
+                kind="treasury",
+                headline="Treasury reallocation",
+                message=reallocation.get("reasoning"),
+                tone="positive",
+                agent=star_agent,
+                target_agent=lagging_agent,
+                amount=shift_amount,
+            )
+            await manager.broadcast({"type": "activity_event", "data": treasury_activity})
+            await manager.broadcast(
+                {
+                    "type": "treasury_update",
+                    "data": {
+                        "message": reallocation.get("reasoning"),
+                        "allocations": sim.get_allocations(),
+                        "star": star_agent,
+                        "lagging": lagging_agent,
+                    },
+                }
+            )
+            await _broadcast_live_state()
 
         if sim.should_trigger_kill_switch():
             sim.override_active = True
@@ -1060,15 +1172,12 @@ async def trading_loop(duration: int):
                 }
             )
 
-        projection = sim.capture_projection()
         await manager.broadcast({"type": "benchmark_update", "data": sim.get_benchmark_payload()})
-        await manager.broadcast({"type": "portfolio_update", "data": _dump_model(sim.get_portfolio_snapshot())})
         await manager.broadcast({"type": "leaderboard_update", "data": sim.get_leaderboard()})
-        await manager.broadcast({"type": "allocation_update", "data": sim.get_agent_allocations()})
-        await manager.broadcast({"type": "projection_update", "data": projection})
+        await _broadcast_live_state()
         await manager.broadcast({"type": "control_state", "data": sim.get_session_state()})
 
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(TICK_DELAY_SECONDS)
 
     sim.session_active = False
     sim.active_scenario = None

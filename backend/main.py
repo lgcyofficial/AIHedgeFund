@@ -30,9 +30,7 @@ async def start_trade(req: StartRequest, background_tasks: BackgroundTasks):
     if req.scenario and req.scenario not in {scenario["id"] for scenario in sim.get_scenarios()}:
         raise HTTPException(status_code=404, detail="Scenario not found.")
 
-    sim.start(req.capital, req.risk)
-    if req.scenario:
-        sim.apply_scenario(req.scenario)
+    sim.start(req.capital, req.risk, req.scenario)
 
     background_tasks.add_task(trading_loop, req.duration)
     return {

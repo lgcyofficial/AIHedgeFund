@@ -21,7 +21,16 @@ import {
   WebSocketMessage,
 } from "../types";
 
-const API_BASE = "http://127.0.0.1:8000";
+function getApiBase() {
+  if (typeof window === "undefined") {
+    return "http://127.0.0.1:8000";
+  }
+  const configured = process.env.NEXT_PUBLIC_API_BASE;
+  if (configured) {
+    return configured;
+  }
+  return `${window.location.protocol}//${window.location.hostname}:8000`;
+}
 
 type HistoryPoint = {
   time: number;
@@ -38,6 +47,7 @@ const defaultControlState: ControlState = {
 };
 
 export function useWebSocket(url: string) {
+  const apiBase = getApiBase();
   const [isConnected, setIsConnected] = useState(false);
   const [portfolio, setPortfolio] = useState<PortfolioState | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -94,12 +104,12 @@ export function useWebSocket(url: string) {
     const loadBootstrap = async () => {
       try {
         const [scenarioRes, stateRes, tradeRes, boardRes, benchmarkRes, telemetryRes] = await Promise.all([
-          fetch(`${API_BASE}/scenarios`),
-          fetch(`${API_BASE}/state`),
-          fetch(`${API_BASE}/trades`),
-          fetch(`${API_BASE}/agents/leaderboard`),
-          fetch(`${API_BASE}/benchmarks`),
-          fetch(`${API_BASE}/telemetry`),
+          fetch(`${apiBase}/scenarios`),
+          fetch(`${apiBase}/state`),
+          fetch(`${apiBase}/trades`),
+          fetch(`${apiBase}/agents/leaderboard`),
+          fetch(`${apiBase}/benchmarks`),
+          fetch(`${apiBase}/telemetry`),
         ]);
 
         if (scenarioRes.ok) {
@@ -130,12 +140,12 @@ export function useWebSocket(url: string) {
           clearLiveState();
         }
       } catch (error) {
-        console.error("Bootstrap fetch failed", error);
+        setIsConnected(false);
       }
     };
 
     loadBootstrap();
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,8 +153,8 @@ export function useWebSocket(url: string) {
     const refresh = async () => {
       try {
         const [stateRes, telemetryRes] = await Promise.all([
-          fetch(`${API_BASE}/state`),
-          fetch(`${API_BASE}/telemetry`),
+          fetch(`${apiBase}/state`),
+          fetch(`${apiBase}/telemetry`),
         ]);
 
         if (!stateRes.ok || cancelled) {
@@ -165,18 +175,18 @@ export function useWebSocket(url: string) {
           clearLiveState();
         }
       } catch (error) {
-        console.error("Polling refresh failed", error);
+        setIsConnected(false);
       }
     };
 
     refresh();
-    const timer = window.setInterval(refresh, 2500);
+    const timer = window.setInterval(refresh, 800);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     let mounted = true;
@@ -314,7 +324,7 @@ export function useWebSocket(url: string) {
     setActivity([]);
     setSessionSummary(null);
 
-    const response = await fetch(`${API_BASE}/trade/start`, {
+    const response = await fetch(`${apiBase}/trade/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ capital, risk, duration, scenario: scenario || null }),
@@ -328,7 +338,7 @@ export function useWebSocket(url: string) {
   };
 
   const applyScenario = async (scenario: string) => {
-    const response = await fetch(`${API_BASE}/scenario/apply`, {
+    const response = await fetch(`${apiBase}/scenario/apply`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scenario }),
@@ -340,7 +350,7 @@ export function useWebSocket(url: string) {
   };
 
   const setOverride = async (enabled: boolean) => {
-    const response = await fetch(`${API_BASE}/control/override`, {
+    const response = await fetch(`${apiBase}/control/override`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
@@ -355,7 +365,7 @@ export function useWebSocket(url: string) {
   };
 
   const setAgentPaused = async (agent: string, paused: boolean) => {
-    const response = await fetch(`${API_BASE}/control/agent`, {
+    const response = await fetch(`${apiBase}/control/agent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent, paused }),

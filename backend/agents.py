@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
-MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "1.5"))
+MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "0.45"))
 
 try:
     genai = __import__("google.generativeai", fromlist=["unused"]) if api_key else None
