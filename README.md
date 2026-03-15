@@ -1,10 +1,10 @@
 # TradeAgent
 
-“We built an AI-native hedge fund simulator that thinks like a team, acts like a fund, and explains itself like a product.”
+We built an AI-native hedge fund simulator that thinks like a team, acts like a fund, and explains itself like a product.
 
 TradeAgent is an AI-native hedge fund simulator for live decision making, portfolio construction, and real-time investment intelligence.
 
-“The problem is not lack of ideas. The problem is turning ideas into coordinated, risk-aware portfolio decisions fast enough to matter.”
+The problem is not lack of ideas. The problem is turning ideas into coordinated, risk-aware portfolio decisions fast enough to matter.
 
 Instead of asking one model to pick a stock, TradeAgent runs an entire fund workflow:
 
