@@ -1,0 +1,16 @@
+.env
+.env.*
+*.env
+
+# Local Python environment
+venv/
+__pycache__/
+
+# Logs and local debug artifacts
+*.log
+test_out.txt
+uvicorn_test.log
+
+# Credential files
+*gemini*key*
+*api_key*

@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+  --color-signal: #ff6b3d;
+  --color-mint: #4dd6c0;
+  --color-ink: #071018;
+  --color-panel: #101826;
+}
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-900, currentColor);
+  }
+  
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-ink);
+    color: #f3f6fb;
+    font-family: "Avenir Next", "Plus Jakarta Sans", "Trebuchet MS", sans-serif;
+  }
+
+  code,
+  pre,
+  input,
+  select,
+  button {
+    font-family: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
