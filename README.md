@@ -17,39 +17,17 @@ Instead of asking one model to pick a stock, TradeAgent runs an entire fund work
 
 It combines a multi-agent trading committee, a portfolio-construction overlay, a research desk, factor and theme exposure models, benchmark tracking, and a backtest lab inside one command deck.
 
-## 30-Second Pitch
+## Why This Lands Immediately
 
-TradeAgent stands out because it does not present AI as a single answer.
+TradeAgent is compelling because it treats AI as an operating system for investment decisions, not as a single recommendation engine.
 
-It presents AI as an operating system for investment decisions.
+The product captures the full workflow that real teams care about. Specialized agents generate ideas from different perspectives. Large trades are challenged through committee voting before capital is deployed. Risk controls and portfolio-construction rules shape what actually gets executed. A research desk interprets the regime, and the dashboard makes the entire process visible through reasoning, exposures, benchmarks, and backtests.
 
-That matters because the product shows the full workflow that real teams actually care about:
+That combination matters because it turns AI output into something structured, auditable, and useful. Instead of showing one answer, TradeAgent shows how a decision is formed, how it is challenged, how it is risk-managed, and how it is evaluated afterward.
 
-- `idea generation`
-  Specialized agents look at the same market through different lenses instead of forcing one model to do everything.
+It also demos extremely well. A user can inject a market event, watch the research brief update, see agents propose trades, observe the committee vote, and then watch the portfolio-construction layer rebalance the book in real time. That sequence makes the product easy to understand quickly while still showing real technical depth.
 
-- `decision quality`
-  Large trades go through committee voting, so the system can challenge itself before putting capital at risk.
-
-- `risk awareness`
-  Position limits, stop-losses, theme caps, kill-switch logic, and portfolio construction are built into the core loop.
-
-- `explainability`
-  The dashboard makes every major action visible through reasoning streams, research briefs, risk events, factor exposures, and benchmark comparisons.
-
-- `evidence`
-  The backtest lab gives the system a way to be judged on scenario performance instead of just one flashy run.
-
-What makes this compelling in a demo is that the audience can watch the entire chain happen live:
-
-1. a market event is injected
-2. the research desk updates the regime
-3. agents propose trades
-4. the committee votes
-5. the portfolio construction layer trims crowding
-6. the book is compared against benchmarks and backtests
-
-That makes TradeAgent feel less like a prototype that generates outputs and more like a product that manages decisions.
+The result is a system that feels less like a prototype generating outputs and more like a product managing decisions.
 
 ## Why This Could Be Real
 
