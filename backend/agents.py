@@ -339,59 +339,6 @@ class Governor(Agent):
         }
 
 
-class ResearchAgent:
-    def __init__(self):
-        self.name = "Research Agent"
-
-    async def brief(self, market_data: Dict[str, Any], news: List[str], portfolio: Dict[str, Any]) -> Dict[str, Any]:
-        changes = market_data.get("changes", {})
-        average_change = sum(changes.values()) / len(changes) if changes else 0.0
-        volatility = max((abs(change) for change in changes.values()), default=0.0)
-        joined_news = " ".join(news).lower()
-
-        if average_change > 0.008:
-            regime = "Risk-On Momentum"
-        elif average_change < -0.008:
-            regime = "Risk-Off Deleveraging"
-        elif volatility > 0.03:
-            regime = "Event-Driven Dispersion"
-        else:
-            regime = "Two-Way Choppy Tape"
-
-        opportunities = []
-        warnings = []
-
-        if "ai" in joined_news or changes.get("NVDA", 0) > 0.01:
-            opportunities.append("AI complex leadership is broadening through NVDA and cloud-adjacent names.")
-        if "rate cuts" in joined_news:
-            opportunities.append("Falling-rate narrative supports long-duration growth and crypto beta.")
-        if changes.get("BTC", 0) > 0.02:
-            opportunities.append("Crypto beta is acting as the fastest expression of liquidity appetite.")
-
-        if "inflation" in joined_news or "oil" in joined_news:
-            warnings.append("Inflation-sensitive headlines can compress multiples across high-beta growth.")
-        if changes.get("BTC", 0) < -0.03:
-            warnings.append("Crypto drawdown raises cross-asset contagion risk for the highest-beta sleeve.")
-        if portfolio.get("return_pct", 0) < -0.03:
-            warnings.append("Fund is pressing into a drawdown, so selectivity should increase.")
-
-        top_assets = sorted(changes.items(), key=lambda item: item[1], reverse=True)
-        watchlist = [asset for asset, _change in top_assets[:3]]
-        primary_risk = warnings[0] if warnings else "No single macro risk dominates; crowding is the bigger issue."
-        summary = (
-            f"{regime} is the dominant regime. Focus on {watchlist[0] if watchlist else 'relative strength'} while respecting downside catalysts."
-        )
-
-        return {
-            "regime": regime,
-            "summary": summary,
-            "primary_risk": primary_risk,
-            "opportunities": opportunities[:3] or ["No outsized catalyst is dominating the tape."],
-            "warnings": warnings[:3] or ["Headline risk is contained, but crowding can still hurt exits."],
-            "watchlist": watchlist,
-        }
-
-
 agents = {
     "Momentum": Agent(
         "Momentum Agent",
@@ -412,4 +359,3 @@ agents = {
 }
 
 governor = Governor()
-research_agent = ResearchAgent()

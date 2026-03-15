@@ -31,38 +31,6 @@ class PortfolioItem(BaseModel):
     market_value: float
     unrealized_pnl: float
     weight: float
-    themes: Dict[str, float] = {}
-
-
-class ThemeExposure(BaseModel):
-    theme: str
-    value: float
-    weight: float
-    assets: Dict[str, float]
-
-
-class FactorExposure(BaseModel):
-    factor: str
-    value: float
-    weight: float
-    assets: Dict[str, float]
-
-
-class ConstructionAction(BaseModel):
-    type: str
-    message: str
-    theme: Optional[str] = None
-    asset: Optional[str] = None
-    amount: float = 0.0
-
-
-class PortfolioConstructionState(BaseModel):
-    status: str
-    dominant_theme: Optional[str]
-    cash_buffer_weight: float
-    concentration_score: float
-    actions: List[ConstructionAction]
-    notes: List[str]
 
 
 class Portfolio(BaseModel):
@@ -75,9 +43,53 @@ class Portfolio(BaseModel):
     total_return_pct: float
     positions: List[PortfolioItem]
     allocations: Dict[str, float]
-    theme_exposures: List[ThemeExposure]
-    factor_exposures: List[FactorExposure]
-    construction: PortfolioConstructionState
+
+
+class AgentAllocation(BaseModel):
+    agent: str
+    capital: float
+    cash: float
+    deployed: float
+    realized_pnl: float
+    unrealized_pnl: float
+    share_pct: float
+    last_decision: str
+    status: str
+
+
+class ProjectionPoint(BaseModel):
+    tick: int
+    time: str
+    total_value: float
+    actual_pnl: float
+    projected_pnl: float
+    projected_total_value: float
+    total_return_pct: float
+    projected_return_pct: float
+
+
+class NewsItem(BaseModel):
+    title: str
+    time: str
+    category: str = "market"
+    sentiment: str = "neutral"
+    impact_score: float = 0.0
+    assets: List[str] = []
+    source: str = "Simulated Tape"
+
+
+class ActivityEvent(BaseModel):
+    id: str
+    time: str
+    kind: str
+    headline: str
+    message: str
+    tone: str = "neutral"
+    agent: Optional[str] = None
+    target_agent: Optional[str] = None
+    asset: Optional[str] = None
+    amount: Optional[float] = None
+    confidence: Optional[float] = None
 
 
 class StartRequest(BaseModel):
@@ -123,36 +135,6 @@ class SessionSummary(BaseModel):
     top_agent: Optional[str]
     benchmark_returns: Dict[str, float]
     headline: str
-
-
-class ResearchBrief(BaseModel):
-    regime: str
-    summary: str
-    primary_risk: str
-    opportunities: List[str]
-    warnings: List[str]
-    watchlist: List[str]
-
-
-class BacktestRun(BaseModel):
-    scenario_id: str
-    scenario_title: str
-    risk: str
-    return_pct: float
-    benchmark_return_pct: float
-    alpha_pct: float
-    max_drawdown_pct: float
-    trade_count: int
-    top_agent: Optional[str]
-    verdict: str
-
-
-class BacktestLab(BaseModel):
-    summary: str
-    best_run: Optional[BacktestRun]
-    average_alpha_pct: float
-    beat_rate: float
-    runs: List[BacktestRun]
 
 
 class AgentSnapshot(BaseModel):

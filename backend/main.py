@@ -59,16 +59,6 @@ async def get_benchmarks():
     return sim.get_benchmark_payload()
 
 
-@app.get("/research")
-async def get_research():
-    return sim.latest_research_brief
-
-
-@app.get("/backtests/lab")
-async def get_backtest_lab():
-    return sim.run_backtest_lab()
-
-
 @app.get("/scenarios")
 async def get_scenarios():
     return sim.get_scenarios()
@@ -79,13 +69,10 @@ async def apply_scenario(req: ScenarioRequest):
     scenario = sim.apply_scenario(req.scenario)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found.")
+    scenario_news = sim.build_news_items(scenario["headlines"])
+    sim.latest_news_items = scenario_news
     await manager.broadcast({"type": "scenario_update", "data": {"active_scenario": sim.active_scenario}})
-    await manager.broadcast(
-        {
-            "type": "news_update",
-            "data": [{"title": headline, "time": ""} for headline in scenario["headlines"]],
-        }
-    )
+    await manager.broadcast({"type": "news_update", "data": scenario_news})
     return {"status": "applied", "scenario": scenario}
 
 
@@ -97,6 +84,19 @@ async def get_leaderboard():
 @app.get("/state")
 async def get_state():
     return sim.get_session_state()
+
+
+@app.get("/telemetry")
+async def get_telemetry():
+    return {
+        "market_data": sim.latest_market_data,
+        "news": sim.latest_news_items,
+        "activity": sim.activity_log,
+        "allocations": sim.get_agent_allocations(),
+        "projection_history": sim.projection_history,
+        "latest_projection": sim.latest_projection,
+        "portfolio": dump_model(sim.get_portfolio_snapshot()),
+    }
 
 
 @app.post("/control/override")

@@ -1,33 +1,31 @@
 import asyncio
 import random
+import re
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents import agents, governor, research_agent
+from agents import agents, governor
 from models import (
+    ActivityEvent,
+    AgentAllocation,
     AgentSnapshot,
-    BacktestLab,
-    BacktestRun,
-    ConstructionAction,
-    FactorExposure,
+    NewsItem,
     Portfolio,
-    PortfolioConstructionState,
     PortfolioItem,
-    ResearchBrief,
+    ProjectionPoint,
     ScenarioDefinition,
     SessionSummary,
-    ThemeExposure,
     Trade,
 )
+from news_service import LiveNewsService
 from websocket_server import manager
 
 RISK_PROFILES = {
     "low": {
         "max_trade_fraction": 0.18,
         "max_position_fraction": 0.22,
-        "max_theme_exposure": 0.34,
         "stop_loss_pct": 0.05,
         "vote_threshold": 0.66,
         "min_confidence": 0.58,
@@ -38,7 +36,6 @@ RISK_PROFILES = {
     "medium": {
         "max_trade_fraction": 0.28,
         "max_position_fraction": 0.32,
-        "max_theme_exposure": 0.42,
         "stop_loss_pct": 0.08,
         "vote_threshold": 0.5,
         "min_confidence": 0.5,
@@ -49,7 +46,6 @@ RISK_PROFILES = {
     "high": {
         "max_trade_fraction": 0.4,
         "max_position_fraction": 0.42,
-        "max_theme_exposure": 0.5,
         "stop_loss_pct": 0.12,
         "vote_threshold": 0.34,
         "min_confidence": 0.42,
@@ -57,22 +53,6 @@ RISK_PROFILES = {
         "kill_switch_drawdown": -0.16,
         "cooldown_ticks": 0,
     },
-}
-
-ASSET_THEME_WEIGHTS = {
-    "NVDA": {"AI Infra": 0.65, "Semis": 0.35},
-    "AAPL": {"Consumer Tech": 0.6, "Quality Growth": 0.4},
-    "BTC": {"Crypto Beta": 0.8, "Macro Liquidity": 0.2},
-    "TSLA": {"High Beta": 0.55, "Mobility": 0.45},
-    "AMZN": {"Cloud + AI": 0.55, "Consumer Tech": 0.45},
-}
-
-ASSET_FACTOR_WEIGHTS = {
-    "NVDA": {"Momentum": 0.45, "Growth": 0.35, "Beta": 0.2},
-    "AAPL": {"Quality": 0.45, "Growth": 0.35, "Low Vol": 0.2},
-    "BTC": {"Beta": 0.45, "Macro Liquidity": 0.35, "Momentum": 0.2},
-    "TSLA": {"Beta": 0.45, "Momentum": 0.3, "Growth": 0.25},
-    "AMZN": {"Growth": 0.35, "Quality": 0.25, "AI": 0.4},
 }
 
 SCENARIOS = {
@@ -135,6 +115,18 @@ def _dump_model(model: Any) -> Dict[str, Any]:
     return model.dict()
 
 
+def _parse_expected_move(text: str) -> float:
+    numbers = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", text or "")]
+    if not numbers:
+        return 0.0
+    midpoint = sum(numbers[:2]) / len(numbers[:2])
+    return midpoint / 100.0
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 class MarketSim:
     def __init__(self):
         self.base_prices = {
@@ -185,27 +177,12 @@ class MarketSim:
         self.pending_headlines: List[str] = []
         self.pending_shocks: Dict[str, float] = {}
         self.latest_news: List[str] = []
+        self.latest_news_items: List[Dict[str, Any]] = []
         self.latest_market_data = {"prices": dict(self.prices), "changes": {asset: 0.0 for asset in self.prices}}
-        self.latest_theme_exposures: List[Dict[str, Any]] = []
-        self.latest_factor_exposures: List[Dict[str, Any]] = []
-        self.latest_construction_state = {
-            "status": "balanced",
-            "dominant_theme": None,
-            "cash_buffer_weight": 1.0,
-            "concentration_score": 0.0,
-            "actions": [],
-            "notes": [],
-        }
-        self.latest_construction_actions: List[Dict[str, Any]] = []
-        self.latest_research_brief = {
-            "regime": "Awaiting Session",
-            "summary": "The research desk will characterize the tape once the market opens.",
-            "primary_risk": "No active session.",
-            "opportunities": [],
-            "warnings": [],
-            "watchlist": [],
-        }
-        self.backtest_lab = None
+        self.latest_projection: Optional[Dict[str, Any]] = None
+        self.projection_history: List[Dict[str, Any]] = []
+        self.activity_log: List[Dict[str, Any]] = []
+        self.latest_agent_signals: Dict[str, Dict[str, Any]] = {}
         self.last_summary = None
 
     def start(self, capital: float, risk: str = "medium"):
@@ -217,6 +194,7 @@ class MarketSim:
             self.agent_funds[agent_name] = split
             self.agent_initial[agent_name] = split
         self.session_active = True
+        self.capture_projection()
 
     def get_scenarios(self) -> List[Dict[str, Any]]:
         return [_dump_model(scenario) for scenario in SCENARIOS.values()]
@@ -311,128 +289,10 @@ class MarketSim:
                     market_value=round(market_value, 2),
                     unrealized_pnl=round(unrealized_pnl, 2),
                     weight=round(market_value / total_value, 4) if total_value else 0.0,
-                    themes=ASSET_THEME_WEIGHTS.get(asset, {}),
                 )
             )
         items.sort(key=lambda item: item.market_value, reverse=True)
         return items
-
-    def get_theme_exposures(self) -> List[ThemeExposure]:
-        total_value = self.get_total_value()
-        if total_value <= 0:
-            self.latest_theme_exposures = []
-            return []
-
-        raw_exposures: Dict[str, Dict[str, Any]] = {}
-        for position in self.get_portfolio_items():
-            for theme, ratio in position.themes.items():
-                bucket = raw_exposures.setdefault(theme, {"value": 0.0, "assets": {}})
-                attributed_value = position.market_value * ratio
-                bucket["value"] += attributed_value
-                bucket["assets"][position.asset] = round(
-                    bucket["assets"].get(position.asset, 0.0) + attributed_value,
-                    2,
-                )
-
-        exposures = [
-            ThemeExposure(
-                theme=theme,
-                value=round(payload["value"], 2),
-                weight=round(payload["value"] / total_value, 4),
-                assets=payload["assets"],
-            )
-            for theme, payload in raw_exposures.items()
-        ]
-        exposures.sort(key=lambda exposure: exposure.weight, reverse=True)
-        self.latest_theme_exposures = [_dump_model(exposure) for exposure in exposures]
-        return exposures
-
-    def get_factor_exposures(self) -> List[FactorExposure]:
-        total_value = self.get_total_value()
-        if total_value <= 0:
-            self.latest_factor_exposures = []
-            return []
-
-        raw_exposures: Dict[str, Dict[str, Any]] = {}
-        for position in self.get_portfolio_items():
-            for factor, ratio in ASSET_FACTOR_WEIGHTS.get(position.asset, {}).items():
-                bucket = raw_exposures.setdefault(factor, {"value": 0.0, "assets": {}})
-                attributed_value = position.market_value * ratio
-                bucket["value"] += attributed_value
-                bucket["assets"][position.asset] = round(
-                    bucket["assets"].get(position.asset, 0.0) + attributed_value,
-                    2,
-                )
-
-        exposures = [
-            FactorExposure(
-                factor=factor,
-                value=round(payload["value"], 2),
-                weight=round(payload["value"] / total_value, 4),
-                assets=payload["assets"],
-            )
-            for factor, payload in raw_exposures.items()
-        ]
-        exposures.sort(key=lambda exposure: exposure.weight, reverse=True)
-        self.latest_factor_exposures = [_dump_model(exposure) for exposure in exposures]
-        return exposures
-
-    def get_theme_value(self, theme: str) -> float:
-        for exposure in self.get_theme_exposures():
-            if exposure.theme == theme:
-                return exposure.value
-        return 0.0
-
-    def get_construction_state(self) -> PortfolioConstructionState:
-        exposures = self.get_theme_exposures()
-        total_value = self.get_total_value()
-        cash_buffer_weight = round(self.get_total_cash() / total_value, 4) if total_value else 1.0
-        dominant_theme = exposures[0].theme if exposures else None
-        concentration_score = round(sum(exposure.weight * exposure.weight for exposure in exposures), 4)
-        actions: List[ConstructionAction] = []
-        notes: List[str] = []
-        status = "balanced"
-        max_theme_exposure = RISK_PROFILES[self.risk]["max_theme_exposure"]
-
-        if exposures:
-            if exposures[0].weight > max_theme_exposure:
-                status = "overweight"
-                notes.append(
-                    "{0} is above the portfolio construction cap at {1:.0f}%.".format(
-                        exposures[0].theme,
-                        exposures[0].weight * 100,
-                    )
-                )
-            if cash_buffer_weight < 0.08:
-                status = "tight" if status == "balanced" else status
-                notes.append("Cash buffer is thin. New risk should be selective.")
-
-        state = PortfolioConstructionState(
-            status=status,
-            dominant_theme=dominant_theme,
-            cash_buffer_weight=cash_buffer_weight,
-            concentration_score=concentration_score,
-            actions=[
-                ConstructionAction(**action) if isinstance(action, dict) else action
-                for action in self.latest_construction_actions
-            ],
-            notes=notes,
-        )
-        self.latest_construction_state = _dump_model(state)
-        return state
-
-    async def get_research_brief(self) -> ResearchBrief:
-        portfolio_state = {
-            "total_value": self.get_total_value(),
-            "cash": self.get_total_cash(),
-            "positions": [_dump_model(item) for item in self.get_portfolio_items()],
-            "return_pct": self.get_total_return_pct(),
-        }
-        brief = ResearchBrief(
-            **(await research_agent.brief(self.latest_market_data, self.latest_news, portfolio_state))
-        )
-        self.latest_research_brief = _dump_model(brief)
-        return brief
 
     def get_allocations(self) -> Dict[str, float]:
         allocations = {}
@@ -454,9 +314,6 @@ class MarketSim:
         return {"values": values, "returns": returns}
 
     def get_portfolio_snapshot(self) -> Portfolio:
-        theme_exposures = self.get_theme_exposures()
-        factor_exposures = self.get_factor_exposures()
-        construction_state = self.get_construction_state()
         return Portfolio(
             capital=round(self.get_total_cash(), 2),
             cash=round(self.get_total_cash(), 2),
@@ -467,9 +324,6 @@ class MarketSim:
             total_return_pct=round(self.get_total_return_pct(), 4),
             positions=self.get_portfolio_items(),
             allocations=self.get_allocations(),
-            theme_exposures=theme_exposures,
-            factor_exposures=factor_exposures,
-            construction=construction_state,
         )
 
     def get_leaderboard(self) -> List[Dict[str, Any]]:
@@ -505,6 +359,35 @@ class MarketSim:
             "active_scenario": self.active_scenario,
         }
 
+    def get_agent_allocations(self) -> List[Dict[str, Any]]:
+        total_capital = self.get_total_value()
+        snapshots = []
+        for agent_name in self.agent_names:
+            capital = self.agent_funds[agent_name] + self.get_agent_deployed_value(agent_name)
+            if agent_name in self.paused_agents:
+                status = "PAUSED"
+            elif self.agent_cooldowns[agent_name] > self.tick:
+                status = "COOLDOWN"
+            else:
+                status = "ACTIVE"
+            snapshots.append(
+                _dump_model(
+                    AgentAllocation(
+                        agent=agent_name,
+                        capital=round(capital, 2),
+                        cash=round(self.agent_funds[agent_name], 2),
+                        deployed=round(self.get_agent_deployed_value(agent_name), 2),
+                        realized_pnl=round(self.agent_realized_pnl[agent_name], 2),
+                        unrealized_pnl=round(self.get_agent_unrealized_pnl(agent_name), 2),
+                        share_pct=round(capital / total_capital, 4) if total_capital else 0.0,
+                        last_decision=self.last_decisions[agent_name],
+                        status=status,
+                    )
+                )
+            )
+        snapshots.sort(key=lambda item: item["capital"], reverse=True)
+        return snapshots
+
     def update_markets(self) -> Dict[str, Any]:
         self.previous_prices = dict(self.prices)
         risk_profile = RISK_PROFILES[self.risk]
@@ -527,12 +410,148 @@ class MarketSim:
         self.latest_market_data = {"prices": dict(self.prices), "changes": changes, "risk_profile": risk_profile}
         return self.latest_market_data
 
-    def get_news(self) -> List[str]:
-        sampled = random.sample(self.news_pool, 2)
-        headlines = list(self.pending_headlines[:2]) + sampled
+    def get_news(self, live_items: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        scenario_headlines = list(self.pending_headlines[:2])
         self.pending_headlines = self.pending_headlines[2:]
-        self.latest_news = headlines[:4]
+        scenario_items = self.build_news_items(scenario_headlines)
+
+        if live_items:
+            combined_items = [*scenario_items, *live_items][:8]
+        else:
+            sampled = random.sample(self.news_pool, 2)
+            fallback_items = self.build_news_items(sampled)
+            combined_items = [*scenario_items, *fallback_items][:4]
+
+        self.latest_news_items = combined_items
+        self.latest_news = [item["title"] for item in combined_items]
         return self.latest_news
+
+    def build_news_items(self, headlines: List[str]) -> List[Dict[str, Any]]:
+        positive_markers = ("cuts", "beat", "accelerating", "higher", "rip", "broadens", "bid")
+        negative_markers = ("hotter", "pressure", "lower", "liquidations", "shock", "disruption", "flush")
+        news_items = []
+        for headline in headlines:
+            lowered = headline.lower()
+            assets = [asset for asset in self.prices if asset.lower() in lowered]
+            if not assets and "ai" in lowered:
+                assets = ["NVDA", "AMZN"]
+            elif not assets and "crypto" in lowered:
+                assets = ["BTC"]
+            elif not assets and ("inflation" in lowered or "oil" in lowered):
+                assets = ["AAPL", "AMZN", "TSLA"]
+
+            sentiment = "neutral"
+            if any(marker in lowered for marker in positive_markers):
+                sentiment = "positive"
+            elif any(marker in lowered for marker in negative_markers):
+                sentiment = "negative"
+
+            category = "macro"
+            if "crypto" in lowered or "btc" in lowered:
+                category = "crypto"
+            elif "earnings" in lowered or "ai" in lowered or "tech" in lowered:
+                category = "equities"
+            elif "fed" in lowered or "inflation" in lowered or "rates" in lowered:
+                category = "macro"
+
+            base_impact = 0.38 + len(assets) * 0.08
+            if sentiment != "neutral":
+                base_impact += 0.14
+
+            news_items.append(
+                _dump_model(
+                    NewsItem(
+                        title=headline,
+                        time=_now_hms(),
+                        category=category,
+                        sentiment=sentiment,
+                        impact_score=round(_clamp(base_impact, 0.25, 0.95), 2),
+                        assets=assets,
+                    )
+                )
+            )
+        return news_items
+
+    def get_projected_total_value(self) -> float:
+        current_value = self.get_total_value()
+        if self.initial_cash <= 0:
+            return current_value
+
+        projected_edge = 0.0
+        for agent_name, decision in self.latest_agent_signals.items():
+            action = decision.get("action", "HOLD")
+            asset = decision.get("asset")
+            if action == "HOLD" or asset not in self.prices:
+                continue
+
+            expected_move = _parse_expected_move(str(decision.get("expected_move", "")))
+            confidence = float(decision.get("confidence", 0.0) or 0.0)
+            amount = float(decision.get("amount", 0.0) or 0.0)
+            position = self.agent_positions[agent_name].get(asset, {})
+            live_exposure = float(position.get("quantity", 0.0) or 0.0) * self.prices[asset]
+
+            if action == "BUY":
+                influence = max(live_exposure, amount)
+                direction = 1.0
+            else:
+                influence = max(amount * 0.65, min(live_exposure, amount) if live_exposure else 0.0)
+                direction = 0.55
+
+            projected_edge += influence * expected_move * confidence * direction
+
+        projected_edge = _clamp(projected_edge, -self.initial_cash * 0.12, self.initial_cash * 0.12)
+        return round(max(current_value + projected_edge, 0.0), 2)
+
+    def capture_projection(self) -> Dict[str, Any]:
+        total_value = round(self.get_total_value(), 2)
+        projected_total_value = self.get_projected_total_value()
+        actual_pnl = round(total_value - self.initial_cash, 2)
+        projected_pnl = round(projected_total_value - self.initial_cash, 2)
+        point = _dump_model(
+            ProjectionPoint(
+                tick=self.tick,
+                time=_now_hms(),
+                total_value=total_value,
+                actual_pnl=actual_pnl,
+                projected_pnl=projected_pnl,
+                projected_total_value=projected_total_value,
+                total_return_pct=round(actual_pnl / self.initial_cash, 4) if self.initial_cash else 0.0,
+                projected_return_pct=round(projected_pnl / self.initial_cash, 4) if self.initial_cash else 0.0,
+            )
+        )
+        self.latest_projection = point
+        self.projection_history = [*self.projection_history, point][-90:]
+        return point
+
+    def push_activity(
+        self,
+        kind: str,
+        headline: str,
+        message: str,
+        tone: str = "neutral",
+        agent: Optional[str] = None,
+        target_agent: Optional[str] = None,
+        asset: Optional[str] = None,
+        amount: Optional[float] = None,
+        confidence: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        event = _dump_model(
+            ActivityEvent(
+                id=str(uuid.uuid4()),
+                time=_now_hms(),
+                kind=kind,
+                headline=headline,
+                message=message,
+                tone=tone,
+                agent=agent,
+                target_agent=target_agent,
+                asset=asset,
+                amount=round(amount, 2) if amount is not None else None,
+                confidence=round(confidence, 2) if confidence is not None else None,
+            )
+        )
+        self.activity_log = [event, *self.activity_log][:80]
+        return event
 
     def _build_trade(
         self,
@@ -614,84 +633,6 @@ class MarketSim:
         self.agent_realized_pnl[agent_name] += realized_pnl
         self.agent_trade_results[agent_name].append(realized_pnl)
         return self._build_trade(agent_name, decision, sell_quantity, proceeds, price, realized_pnl, committee_approved, risk_flag)
-
-    def enforce_portfolio_construction(self) -> Tuple[List[Trade], List[Dict[str, Any]]]:
-        exposures = self.get_theme_exposures()
-        if not exposures:
-            self.latest_construction_state = _dump_model(self.get_construction_state())
-            return [], []
-
-        total_value = self.get_total_value()
-        max_theme_exposure = RISK_PROFILES[self.risk]["max_theme_exposure"]
-        construction_trades: List[Trade] = []
-        actions: List[ConstructionAction] = []
-
-        for exposure in exposures:
-            if exposure.weight <= max_theme_exposure:
-                continue
-
-            excess_value = exposure.value - (total_value * max_theme_exposure)
-            trim_value = round(min(excess_value * 0.55, exposure.value * 0.2), 2)
-            if trim_value <= 0:
-                continue
-
-            ranked_assets = sorted(exposure.assets.items(), key=lambda item: item[1], reverse=True)
-            trimmed = False
-            for asset, _asset_value in ranked_assets:
-                ranked_agents = sorted(
-                    [
-                        (
-                            agent_name,
-                            self.agent_positions[agent_name][asset]["quantity"] * self.prices[asset],
-                        )
-                        for agent_name in self.agent_names
-                        if asset in self.agent_positions[agent_name]
-                    ],
-                    key=lambda item: item[1],
-                    reverse=True,
-                )
-                for agent_name, position_value in ranked_agents:
-                    if position_value <= 0:
-                        continue
-                    sell_amount = min(trim_value, position_value)
-                    decision = {
-                        "asset": asset,
-                        "action": "SELL",
-                        "amount": sell_amount,
-                        "confidence": 0.99,
-                        "reasoning": "Portfolio construction layer trimmed concentration in the dominant theme.",
-                        "thesis": "Theme crowding exceeded the overlay cap.",
-                        "catalyst": "{0} exposure rebalance".format(exposure.theme),
-                        "expected_move": "de-risk",
-                    }
-                    trade = self.update_portfolio(
-                        agent_name,
-                        decision,
-                        committee_approved=True,
-                        risk_flag="PORTFOLIO_CONSTRUCTION",
-                    )
-                    if trade is not None:
-                        construction_trades.append(trade)
-                        action = ConstructionAction(
-                            type="trim",
-                            message="Trimmed {0} to reduce {1} concentration.".format(asset, exposure.theme),
-                            theme=exposure.theme,
-                            asset=asset,
-                            amount=trade.amount,
-                        )
-                        actions.append(action)
-                        trimmed = True
-                        break
-                if trimmed:
-                    break
-
-        self.latest_construction_actions = [_dump_model(action) for action in actions]
-        state = self.get_construction_state()
-        if actions:
-            state.status = "rebalanced"
-            state.notes.append("Overlay reduced concentrated sleeves after agent execution.")
-        self.latest_construction_state = _dump_model(state)
-        return construction_trades, self.latest_construction_actions
 
     def enforce_stop_losses(self) -> List[Trade]:
         risk_profile = RISK_PROFILES[self.risk]
@@ -785,22 +726,6 @@ class MarketSim:
                 decision["amount"] = round(room, 2)
                 messages.append("Position cap reduced incremental exposure.")
 
-            total_value = max(self.get_total_value(), 1.0)
-            for theme, ratio in ASSET_THEME_WEIGHTS.get(asset, {}).items():
-                current_theme_value = self.get_theme_value(theme)
-                max_theme_value = total_value * risk_profile["max_theme_exposure"]
-                theme_room = max(max_theme_value - current_theme_value, 0.0)
-                attributed_amount_room = theme_room / ratio if ratio else 0.0
-                if attributed_amount_room <= 0:
-                    decision["action"] = "HOLD"
-                    decision["amount"] = 0
-                    decision["reasoning"] = "Theme construction overlay blocked the trade due to crowding."
-                    messages.append("{0} exposure is already full, so the overlay blocked new {1} risk.".format(theme, asset))
-                    return decision, messages
-                if decision["amount"] > attributed_amount_room:
-                    decision["amount"] = round(attributed_amount_room, 2)
-                    messages.append("Construction overlay scaled the trade to keep {0} within cap.".format(theme))
-
         if decision["amount"] <= 0:
             decision["action"] = "HOLD"
             decision["reasoning"] = "Risk filters reduced the order size to zero."
@@ -832,108 +757,65 @@ class MarketSim:
         self.last_summary = _dump_model(summary)
         return self.last_summary
 
-    def run_backtest_lab(self) -> Dict[str, Any]:
-        runs: List[BacktestRun] = []
-        risk_profiles = ["low", "medium", "high"]
-        scenario_bias = {
-            "fed-pivot": 0.028,
-            "nvda-earnings-beat": 0.041,
-            "crypto-flush": -0.024,
-            "oil-shock": -0.017,
-        }
-        risk_lift = {"low": -0.01, "medium": 0.008, "high": 0.02}
-        benchmark_drag = {"fed-pivot": 0.018, "nvda-earnings-beat": 0.026, "crypto-flush": -0.012, "oil-shock": -0.008}
-
-        for scenario_id, scenario in SCENARIOS.items():
-            for risk in risk_profiles:
-                seed = f"{scenario_id}-{risk}"
-                rng = random.Random(seed)
-                strategy_edge = scenario_bias[scenario_id] + risk_lift[risk] + rng.uniform(-0.01, 0.012)
-                benchmark_return = benchmark_drag[scenario_id] + (0.005 if risk == "high" else 0.0) + rng.uniform(-0.008, 0.008)
-                max_drawdown = abs(strategy_edge) * (0.9 if risk == "low" else 1.15 if risk == "medium" else 1.45) + rng.uniform(0.01, 0.028)
-                trade_count = int(12 + abs(strategy_edge) * 220 + (6 if risk == "high" else 0))
-                top_agent = (
-                    "News" if scenario_id in {"fed-pivot", "nvda-earnings-beat"} else "Volatility" if scenario_id == "crypto-flush" else "Macro"
-                )
-                alpha = strategy_edge - benchmark_return
-                verdict = "Beat benchmark" if alpha > 0 else "Lagged benchmark"
-
-                runs.append(
-                    BacktestRun(
-                        scenario_id=scenario_id,
-                        scenario_title=scenario.title,
-                        risk=risk,
-                        return_pct=round(strategy_edge, 4),
-                        benchmark_return_pct=round(benchmark_return, 4),
-                        alpha_pct=round(alpha, 4),
-                        max_drawdown_pct=round(max_drawdown, 4),
-                        trade_count=trade_count,
-                        top_agent=top_agent,
-                        verdict=verdict,
-                    )
-                )
-
-        best_run = max(runs, key=lambda run: run.alpha_pct) if runs else None
-        beat_count = len([run for run in runs if run.alpha_pct > 0])
-        average_alpha = round(sum(run.alpha_pct for run in runs) / len(runs), 4) if runs else 0.0
-        beat_rate = round(beat_count / len(runs), 4) if runs else 0.0
-
-        lab = BacktestLab(
-            summary="Backtest lab shows how the multi-agent stack performs across scenario shocks and risk mandates.",
-            best_run=best_run,
-            average_alpha_pct=average_alpha,
-            beat_rate=beat_rate,
-            runs=runs,
-        )
-        self.backtest_lab = _dump_model(lab)
-        return self.backtest_lab
-
 
 sim = MarketSim()
+live_news_service = LiveNewsService()
 
 
 async def _broadcast_core_state():
     await manager.broadcast({"type": "market_update", "data": sim.latest_market_data})
-    await manager.broadcast(
-        {
-            "type": "news_update",
-            "data": [{"title": headline, "time": _now_hms()} for headline in sim.latest_news],
-        }
-    )
-    await sim.get_research_brief()
+    await manager.broadcast({"type": "news_update", "data": sim.latest_news_items})
     await manager.broadcast({"type": "portfolio_update", "data": _dump_model(sim.get_portfolio_snapshot())})
-    await manager.broadcast({"type": "portfolio_construction", "data": sim.latest_construction_state})
-    await manager.broadcast({"type": "research_update", "data": sim.latest_research_brief})
     await manager.broadcast({"type": "benchmark_update", "data": sim.get_benchmark_payload()})
     await manager.broadcast({"type": "leaderboard_update", "data": sim.get_leaderboard()})
+    await manager.broadcast({"type": "allocation_update", "data": sim.get_agent_allocations()})
+    if sim.latest_projection is not None:
+        await manager.broadcast({"type": "projection_update", "data": sim.latest_projection})
     await manager.broadcast({"type": "control_state", "data": sim.get_session_state()})
 
 
 async def trading_loop(duration: int):
     sim.session_active = True
     end_time = time.time() + duration
+    sim.latest_news_items = sim.build_news_items(sim.latest_news)
     await _broadcast_core_state()
 
     while time.time() < end_time and sim.session_active:
         sim.tick += 1
         markets = sim.update_markets()
-        news = sim.get_news()
+        live_news = await asyncio.to_thread(live_news_service.fetch, sim.prices)
+        news = sim.get_news(live_news)
 
         await manager.broadcast({"type": "scenario_update", "data": {"active_scenario": sim.active_scenario}})
         await manager.broadcast({"type": "market_update", "data": markets})
-        await manager.broadcast(
-            {
-                "type": "news_update",
-                "data": [{"title": headline, "time": _now_hms()} for headline in news],
-            }
-        )
-        await sim.get_research_brief()
-        await manager.broadcast({"type": "research_update", "data": sim.latest_research_brief})
+        await manager.broadcast({"type": "news_update", "data": sim.latest_news_items})
+        for item in sim.latest_news_items:
+            activity = sim.push_activity(
+                kind="news",
+                headline=item["category"].upper(),
+                message=item["title"],
+                tone="positive" if item["sentiment"] == "positive" else "negative" if item["sentiment"] == "negative" else "neutral",
+                asset=item["assets"][0] if item["assets"] else None,
+            )
+            await manager.broadcast({"type": "activity_event", "data": activity})
 
         forced_trades = sim.enforce_stop_losses()
         for forced_trade in forced_trades:
             sim.trades.append(forced_trade)
             await manager.broadcast({"type": "trade_execution", "data": _dump_model(forced_trade)})
+            activity = sim.push_activity(
+                kind="risk",
+                headline="Stop-loss exit",
+                message="{0} was forced out of {1} after a drawdown breach.".format(
+                    forced_trade.agent, forced_trade.asset
+                ),
+                tone="negative",
+                agent=forced_trade.agent,
+                asset=forced_trade.asset,
+                amount=forced_trade.amount,
+                confidence=forced_trade.confidence,
+            )
+            await manager.broadcast({"type": "activity_event", "data": activity})
             await manager.broadcast(
                 {
                     "type": "risk_event",
@@ -956,8 +838,8 @@ async def trading_loop(duration: int):
             {
                 "type": "agent_coordination",
                 "data": {
-                    "message": "Committee is processing {0} headlines across {1} tradable assets.".format(
-                        len(news), len(sim.prices)
+                    "message": "Committee is routing {0} fresh headlines, {1} open positions, and live treasury pressure.".format(
+                        len(news), len(sim.get_portfolio_items())
                     )
                 },
             }
@@ -967,9 +849,21 @@ async def trading_loop(duration: int):
         for agent_name, agent_obj in agents.items():
             decision = await agent_obj.analyze(markets, news, portfolio_state, sim.agent_funds[agent_name])
             decision, risk_messages = sim._risk_adjust_decision(agent_name, decision)
+            sim.latest_agent_signals[agent_name] = dict(decision)
             committee_approved = True
 
             for message in risk_messages:
+                activity = sim.push_activity(
+                    kind="risk",
+                    headline="Risk engine intervention",
+                    message=message,
+                    tone="negative",
+                    agent=agent_name,
+                    asset=decision.get("asset"),
+                    amount=float(decision.get("amount", 0.0) or 0.0),
+                    confidence=float(decision.get("confidence", 0.0) or 0.0),
+                )
+                await manager.broadcast({"type": "activity_event", "data": activity})
                 await manager.broadcast(
                     {
                         "type": "risk_event",
@@ -989,6 +883,23 @@ async def trading_loop(duration: int):
                         continue
                     vote_result = await judge_obj.judge(decision, news)
                     votes.append(vote_result)
+                    relay_activity = sim.push_activity(
+                        kind="relay",
+                        headline="{0} to {1}".format(judge_name, agent_name),
+                        message="{0} {1} the {2} {3} ticket.".format(
+                            judge_name,
+                            "backs" if vote_result.get("vote") == "YES" else "pushes back on",
+                            decision.get("action", "HOLD"),
+                            decision.get("asset", "basket"),
+                        ),
+                        tone="positive" if vote_result.get("vote") == "YES" else "negative",
+                        agent=judge_name,
+                        target_agent=agent_name,
+                        asset=decision.get("asset"),
+                        amount=float(decision.get("amount", 0.0) or 0.0),
+                        confidence=float(decision.get("confidence", 0.0) or 0.0),
+                    )
+                    await manager.broadcast({"type": "activity_event", "data": relay_activity})
 
                 yes_votes = len([vote for vote in votes if vote.get("vote") == "YES"])
                 consensus = yes_votes / float(len(votes)) if votes else 1.0
@@ -1021,6 +932,16 @@ async def trading_loop(duration: int):
                     decision["action"] = "HOLD"
                     decision["amount"] = 0
                     decision["reasoning"] = "Investment committee rejected the proposal."
+                    veto_activity = sim.push_activity(
+                        kind="committee",
+                        headline="Committee veto",
+                        message="{0} lost committee approval on {1}.".format(agent_name, decision.get("asset")),
+                        tone="negative",
+                        agent=agent_name,
+                        asset=decision.get("asset"),
+                        confidence=float(decision.get("confidence", 0.0) or 0.0),
+                    )
+                    await manager.broadcast({"type": "activity_event", "data": veto_activity})
                     await manager.broadcast(
                         {
                             "type": "risk_event",
@@ -1039,11 +960,42 @@ async def trading_loop(duration: int):
                     "data": {"agent": agent_name, "reasoning": decision.get("reasoning"), "decision": decision},
                 }
             )
+            reasoning_activity = sim.push_activity(
+                kind="decision",
+                headline="{0} {1} {2}".format(
+                    agent_name,
+                    decision.get("action", "HOLD"),
+                    decision.get("asset", "watchlist"),
+                ),
+                message=decision.get("reasoning", "No reasoning provided."),
+                tone="positive" if decision.get("action") == "BUY" else "negative" if decision.get("action") == "SELL" else "neutral",
+                agent=agent_name,
+                asset=decision.get("asset"),
+                amount=float(decision.get("amount", 0.0) or 0.0),
+                confidence=float(decision.get("confidence", 0.0) or 0.0),
+            )
+            await manager.broadcast({"type": "activity_event", "data": reasoning_activity})
 
             trade = sim.update_portfolio(agent_name, decision, committee_approved)
             if trade is not None:
                 sim.trades.append(trade)
                 await manager.broadcast({"type": "trade_execution", "data": _dump_model(trade)})
+                trade_activity = sim.push_activity(
+                    kind="trade",
+                    headline="{0} executed {1} {2}".format(agent_name, trade.action, trade.asset),
+                    message="{0} routed {1} at {2} with {3:.0f}% confidence.".format(
+                        agent_name,
+                        format(trade.amount, ".2f"),
+                        format(trade.price, ".2f"),
+                        trade.confidence * 100,
+                    ),
+                    tone="positive" if trade.action == "BUY" else "neutral",
+                    agent=agent_name,
+                    asset=trade.asset,
+                    amount=trade.amount,
+                    confidence=trade.confidence,
+                )
+                await manager.broadcast({"type": "activity_event", "data": trade_activity})
 
             agent_performance[agent_name] = {
                 "balance": sim.agent_funds[agent_name],
@@ -1066,6 +1018,16 @@ async def trading_loop(duration: int):
             if shift_amount > 0:
                 sim.agent_funds[lagging_agent] -= shift_amount
                 sim.agent_funds[star_agent] += shift_amount
+                treasury_activity = sim.push_activity(
+                    kind="treasury",
+                    headline="Treasury reallocation",
+                    message=reallocation.get("reasoning"),
+                    tone="positive",
+                    agent=star_agent,
+                    target_agent=lagging_agent,
+                    amount=shift_amount,
+                )
+                await manager.broadcast({"type": "activity_event", "data": treasury_activity})
                 await manager.broadcast(
                     {
                         "type": "treasury_update",
@@ -1078,27 +1040,15 @@ async def trading_loop(duration: int):
                     }
                 )
 
-        construction_trades, construction_actions = sim.enforce_portfolio_construction()
-        for trade in construction_trades:
-            sim.trades.append(trade)
-            await manager.broadcast({"type": "trade_execution", "data": _dump_model(trade)})
-
-        if construction_actions or sim.latest_construction_state.get("dominant_theme"):
-            await manager.broadcast({"type": "portfolio_construction", "data": sim.latest_construction_state})
-            for action in construction_actions:
-                await manager.broadcast(
-                    {
-                        "type": "risk_event",
-                        "data": {
-                            "time": _now_hms(),
-                            "severity": "medium",
-                            "message": action["message"],
-                        },
-                    }
-                )
-
         if sim.should_trigger_kill_switch():
             sim.override_active = True
+            kill_switch_activity = sim.push_activity(
+                kind="risk",
+                headline="Kill switch engaged",
+                message="Autonomous execution is paused after the drawdown threshold was breached.",
+                tone="negative",
+            )
+            await manager.broadcast({"type": "activity_event", "data": kill_switch_activity})
             await manager.broadcast(
                 {
                     "type": "risk_event",
@@ -1110,14 +1060,18 @@ async def trading_loop(duration: int):
                 }
             )
 
+        projection = sim.capture_projection()
         await manager.broadcast({"type": "benchmark_update", "data": sim.get_benchmark_payload()})
         await manager.broadcast({"type": "portfolio_update", "data": _dump_model(sim.get_portfolio_snapshot())})
         await manager.broadcast({"type": "leaderboard_update", "data": sim.get_leaderboard()})
+        await manager.broadcast({"type": "allocation_update", "data": sim.get_agent_allocations()})
+        await manager.broadcast({"type": "projection_update", "data": projection})
         await manager.broadcast({"type": "control_state", "data": sim.get_session_state()})
 
         await asyncio.sleep(2.5)
 
     sim.session_active = False
+    sim.active_scenario = None
     summary = sim.generate_summary()
     await manager.broadcast({"type": "session_summary", "data": summary})
     await manager.broadcast({"type": "session_end", "data": summary})

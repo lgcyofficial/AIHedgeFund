@@ -26,38 +26,6 @@ export interface PortfolioPosition {
   market_value: number;
   unrealized_pnl: number;
   weight: number;
-  themes: Record<string, number>;
-}
-
-export interface ThemeExposure {
-  theme: string;
-  value: number;
-  weight: number;
-  assets: Record<string, number>;
-}
-
-export interface FactorExposure {
-  factor: string;
-  value: number;
-  weight: number;
-  assets: Record<string, number>;
-}
-
-export interface ConstructionAction {
-  type: string;
-  message: string;
-  theme?: string | null;
-  asset?: string | null;
-  amount: number;
-}
-
-export interface PortfolioConstructionState {
-  status: string;
-  dominant_theme: string | null;
-  cash_buffer_weight: number;
-  concentration_score: number;
-  actions: ConstructionAction[];
-  notes: string[];
 }
 
 export interface PortfolioState {
@@ -70,9 +38,6 @@ export interface PortfolioState {
   total_return_pct: number;
   positions: PortfolioPosition[];
   allocations: Record<string, number>;
-  theme_exposures: ThemeExposure[];
-  factor_exposures: FactorExposure[];
-  construction: PortfolioConstructionState;
 }
 
 export interface AgentReasoning {
@@ -97,6 +62,11 @@ export interface MarketState {
 export interface NewsItem {
   title: string;
   time: string;
+  category: string;
+  sentiment: 'positive' | 'negative' | 'neutral';
+  impact_score: number;
+  assets: string[];
+  source: string;
 }
 
 export interface BenchmarkState {
@@ -114,6 +84,18 @@ export interface AgentLeaderboardEntry {
   win_rate: number;
   last_decision: string;
   paused: boolean;
+}
+
+export interface AgentAllocation {
+  agent: string;
+  capital: number;
+  cash: number;
+  deployed: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  share_pct: number;
+  last_decision: string;
+  status: 'ACTIVE' | 'PAUSED' | 'COOLDOWN';
 }
 
 export interface CommitteeVoteRecord {
@@ -134,6 +116,31 @@ export interface RiskEvent {
   time: string;
   severity: 'medium' | 'high';
   message: string;
+}
+
+export interface ProjectionPoint {
+  tick: number;
+  time: string;
+  total_value: number;
+  actual_pnl: number;
+  projected_pnl: number;
+  projected_total_value: number;
+  total_return_pct: number;
+  projected_return_pct: number;
+}
+
+export interface ActivityEvent {
+  id: string;
+  time: string;
+  kind: string;
+  headline: string;
+  message: string;
+  tone: 'positive' | 'negative' | 'neutral';
+  agent?: string | null;
+  target_agent?: string | null;
+  asset?: string | null;
+  amount?: number | null;
+  confidence?: number | null;
 }
 
 export interface ScenarioDefinition {
@@ -163,36 +170,6 @@ export interface SessionSummary {
   headline: string;
 }
 
-export interface ResearchBrief {
-  regime: string;
-  summary: string;
-  primary_risk: string;
-  opportunities: string[];
-  warnings: string[];
-  watchlist: string[];
-}
-
-export interface BacktestRun {
-  scenario_id: string;
-  scenario_title: string;
-  risk: string;
-  return_pct: number;
-  benchmark_return_pct: number;
-  alpha_pct: number;
-  max_drawdown_pct: number;
-  trade_count: number;
-  top_agent: string | null;
-  verdict: string;
-}
-
-export interface BacktestLab {
-  summary: string;
-  best_run: BacktestRun | null;
-  average_alpha_pct: number;
-  beat_rate: number;
-  runs: BacktestRun[];
-}
-
 export interface WebSocketMessageMap {
   portfolio_update: PortfolioState;
   trade_execution: Trade;
@@ -205,12 +182,13 @@ export interface WebSocketMessageMap {
   committee_vote: CommitteeVoteEvent;
   benchmark_update: BenchmarkState;
   leaderboard_update: AgentLeaderboardEntry[];
+  allocation_update: AgentAllocation[];
+  projection_update: ProjectionPoint;
+  activity_event: ActivityEvent;
   risk_event: RiskEvent;
   scenario_update: { active_scenario: string | null };
   control_state: ControlState;
   session_summary: SessionSummary;
-  portfolio_construction: PortfolioConstructionState;
-  research_update: ResearchBrief;
 }
 
 export type WebSocketMessage = {

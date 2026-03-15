@@ -1,303 +1,389 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 
 import { useWebSocket } from "../hooks/useWebSocket";
-import { AgentLeaderboardEntry, BacktestLab, BenchmarkState, FactorExposure, ThemeExposure, Trade } from "../types";
+import { ActivityEvent, AgentAllocation, MarketState, NewsItem, ProjectionPoint } from "../types";
 
 const SOCKET_URL = "ws://127.0.0.1:8000/ws/stream";
+const SESSION_DURATION_SECONDS = 60;
 const PANEL =
-  "rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(18,24,38,0.9),rgba(7,10,18,0.94))] shadow-[0_24px_80px_rgba(0,0,0,0.45)] backdrop-blur";
+  "rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(14,18,24,0.98),rgba(7,10,15,0.98))] shadow-[0_22px_70px_rgba(0,0,0,0.38)] backdrop-blur";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value || 0);
+}
+
+function formatCompactCurrency(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
     maximumFractionDigits: 2,
   }).format(value || 0);
+}
+
+function formatSignedCurrency(value: number) {
+  return `${value >= 0 ? "+" : "-"}${formatCurrency(Math.abs(value))}`;
 }
 
 function formatPercent(value: number) {
   return `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
 }
 
-function buildChartSeries(
-  history: { time: number; fund: number; benchmarks: Record<string, number> }[],
-  benchmarkState: BenchmarkState,
-) {
-  if (!history.length) {
-    return [];
-  }
-
-  const names = ["Fund", ...Object.keys(benchmarkState.values)];
-  return names.map((name) => ({
-    name,
-    color:
-      name === "Fund"
-        ? "#FF6B3D"
-        : name === "SPY"
-          ? "#4DD6C0"
-          : name === "QQQ"
-            ? "#F4D35E"
-            : "#89A6FB",
-    points: history.map((point, index) => {
-      const value = name === "Fund" ? point.fund : point.benchmarks[name] ?? point.fund;
-      return { x: index, value };
-    }),
-  }));
+function formatShortTime(value: string) {
+  return value?.slice(0, 5) || "--:--";
 }
 
-function PerformanceChart({
-  history,
-  benchmarkState,
-}: {
-  history: { time: number; fund: number; benchmarks: Record<string, number> }[];
-  benchmarkState: BenchmarkState;
-}) {
-  const series = buildChartSeries(history, benchmarkState);
+function statusClasses(status: AgentAllocation["status"]) {
+  if (status === "ACTIVE") {
+    return "bg-emerald-500/[0.12] text-emerald-200 ring-1 ring-emerald-400/20";
+  }
+  if (status === "COOLDOWN") {
+    return "bg-amber-500/[0.12] text-amber-100 ring-1 ring-amber-300/20";
+  }
+  return "bg-rose-500/[0.12] text-rose-200 ring-1 ring-rose-300/20";
+}
 
-  if (!series.length) {
-    return <div className="flex h-full items-center justify-center text-sm text-white/40">Waiting for live data...</div>;
+function sentimentClasses(sentiment: NewsItem["sentiment"]) {
+  if (sentiment === "positive") {
+    return "text-emerald-200";
+  }
+  if (sentiment === "negative") {
+    return "text-rose-200";
+  }
+  return "text-slate-300";
+}
+
+function agentBadgeClasses(agent?: string | null) {
+  const key = (agent || "system").toLowerCase();
+  if (key.includes("momentum")) {
+    return "bg-cyan-500/[0.14] text-cyan-100 ring-1 ring-cyan-300/20";
+  }
+  if (key.includes("news")) {
+    return "bg-orange-500/[0.14] text-orange-100 ring-1 ring-orange-300/20";
+  }
+  if (key.includes("macro")) {
+    return "bg-lime-500/[0.14] text-lime-100 ring-1 ring-lime-300/20";
+  }
+  if (key.includes("volatility")) {
+    return "bg-fuchsia-500/[0.14] text-fuchsia-100 ring-1 ring-fuchsia-300/20";
+  }
+  return "bg-white/[0.08] text-slate-200 ring-1 ring-white/10";
+}
+
+function chartTone(value: number) {
+  return value >= 0 ? "text-emerald-200" : "text-rose-200";
+}
+
+function PerformanceChart({ history }: { history: ProjectionPoint[] }) {
+  if (!history.length) {
+    return <div className="flex h-full items-center justify-center text-sm text-slate-400">Waiting for live trade data...</div>;
   }
 
-  const width = 680;
+  const width = 720;
   const height = 260;
   const padding = 26;
-  const allValues = series.flatMap((line) => line.points.map((point) => point.value));
-  const minValue = Math.min(...allValues);
-  const maxValue = Math.max(...allValues);
-  const range = maxValue - minValue || 1;
-
-  const getX = (index: number, total: number) =>
-    padding + (index / Math.max(total - 1, 1)) * (width - padding * 2);
-  const getY = (value: number) => height - padding - ((value - minValue) / range) * (height - padding * 2);
+  const values = history.flatMap((point) => [point.actual_pnl, point.projected_pnl, 0]);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const getX = (index: number) => padding + (index / Math.max(history.length - 1, 1)) * (width - padding * 2);
+  const getY = (value: number) => height - padding - ((value - min) / range) * (height - padding * 2);
+  const actualPath = history.map((point, index) => `${getX(index)},${getY(point.actual_pnl)}`).join(" ");
+  const projectedPath = history.map((point, index) => `${getX(index)},${getY(point.projected_pnl)}`).join(" ");
+  const latest = history[history.length - 1];
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
-      <defs>
-        <filter id="chartGlow">
-          <feGaussianBlur stdDeviation="2.5" result="coloredBlur" />
-          <feMerge>
-            <feMergeNode in="coloredBlur" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
-      </defs>
-      <rect x="0" y="0" width={width} height={height} rx="24" fill="transparent" />
-      {[0.2, 0.4, 0.6, 0.8].map((ratio) => (
-        <line
-          key={ratio}
-          x1={padding}
-          x2={width - padding}
-          y1={padding + ratio * (height - padding * 2)}
-          y2={padding + ratio * (height - padding * 2)}
-          stroke="rgba(255,255,255,0.08)"
-          strokeDasharray="4 8"
-        />
-      ))}
-      {series.map((line) => (
-        <polyline
-          key={line.name}
-          fill="none"
-          stroke={line.color}
-          strokeWidth={line.name === "Fund" ? 3.5 : 2}
-          filter="url(#chartGlow)"
-          points={line.points.map((point, index) => `${getX(index, line.points.length)},${getY(point.value)}`).join(" ")}
-        />
-      ))}
+      {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+        const y = padding + ratio * (height - padding * 2);
+        return <line key={ratio} x1={padding} x2={width - padding} y1={y} y2={y} stroke="rgba(255,255,255,0.08)" strokeDasharray="4 10" />;
+      })}
+      <line x1={padding} x2={width - padding} y1={getY(0)} y2={getY(0)} stroke="rgba(255,255,255,0.18)" />
+      <polyline fill="none" stroke="#fb923c" strokeWidth="3.2" points={actualPath} />
+      <polyline fill="none" stroke="#2dd4bf" strokeWidth="2.9" strokeDasharray="8 8" points={projectedPath} />
+      <circle cx={getX(history.length - 1)} cy={getY(latest.actual_pnl)} r="4.5" fill="#fb923c" />
+      <circle cx={getX(history.length - 1)} cy={getY(latest.projected_pnl)} r="4.5" fill="#2dd4bf" />
     </svg>
   );
 }
 
-function LeaderboardCard({
-  leaderboard,
+function PnlPanel({
+  projectionHistory,
+  latestProjection,
+  portfolioValue,
+  totalReturn,
+}: {
+  projectionHistory: ProjectionPoint[];
+  latestProjection: ProjectionPoint | null;
+  portfolioValue: number;
+  totalReturn: number;
+}) {
+  const actualPnl = latestProjection?.actual_pnl ?? 0;
+  const projectedPnl = latestProjection?.projected_pnl ?? 0;
+
+  return (
+    <section className={`${PANEL} flex min-h-0 flex-col p-4`}>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.34em] text-orange-300/80">Trade P&L</div>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-50">Real-time profit and loss</h2>
+        </div>
+        <div className="flex gap-2 text-[10px] uppercase tracking-[0.22em]">
+          <span className="rounded-full bg-orange-500/[0.12] px-3 py-1 text-orange-100 ring-1 ring-orange-300/20">Actual</span>
+          <span className="rounded-full bg-teal-500/[0.12] px-3 py-1 text-teal-100 ring-1 ring-teal-300/20">Projected</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <div className="rounded-[18px] border border-white/10 bg-black/[0.18] p-3">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">NAV</div>
+          <div className="mt-2 text-xl font-semibold text-slate-50">{formatCompactCurrency(portfolioValue)}</div>
+        </div>
+        <div className="rounded-[18px] border border-white/10 bg-black/[0.18] p-3">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Return</div>
+          <div className={`mt-2 text-xl font-semibold ${chartTone(totalReturn)}`}>{formatPercent(totalReturn)}</div>
+        </div>
+        <div className="rounded-[18px] border border-white/10 bg-black/[0.18] p-3">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Live P&L</div>
+          <div className={`mt-2 text-xl font-semibold ${chartTone(actualPnl)}`}>{formatSignedCurrency(actualPnl)}</div>
+        </div>
+        <div className="rounded-[18px] border border-white/10 bg-black/[0.18] p-3">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Forward P&L</div>
+          <div className={`mt-2 text-xl font-semibold ${chartTone(projectedPnl)}`}>{formatSignedCurrency(projectedPnl)}</div>
+        </div>
+      </div>
+
+      <div className="mt-4 min-h-[280px] flex-1 overflow-hidden rounded-[20px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_46%),linear-gradient(180deg,rgba(7,10,15,0.92),rgba(5,8,11,0.98))] p-3">
+        <PerformanceChart history={projectionHistory} />
+      </div>
+    </section>
+  );
+}
+
+function AllocationTable({
+  allocations,
   pausedAgents,
   onToggleAgent,
 }: {
-  leaderboard: AgentLeaderboardEntry[];
+  allocations: AgentAllocation[];
   pausedAgents: string[];
   onToggleAgent: (agent: string, paused: boolean) => Promise<void>;
 }) {
   return (
-    <div className={`${PANEL} p-5`}>
-      <div className="mb-4 flex items-center justify-between">
+    <section className={`${PANEL} flex min-h-0 flex-col p-4`}>
+      <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <div className="text-xs uppercase tracking-[0.24em] text-white/40">Agent Leaderboard</div>
-          <div className="text-lg font-semibold text-white">Capital earns merit</div>
+          <div className="text-[10px] uppercase tracking-[0.34em] text-orange-300/80">Treasury Split</div>
+          <h2 className="mt-2 text-xl font-semibold text-slate-50">Capital allocated by agent</h2>
         </div>
       </div>
-      <div className="space-y-3">
-        {leaderboard.map((agent, index) => {
-          const score = agent.realized_pnl + agent.unrealized_pnl;
-          const paused = pausedAgents.includes(agent.agent);
-          return (
-            <div key={agent.agent} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-              <div className="mb-2 flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.22em] text-white/35">#{index + 1}</div>
-                  <div className="text-sm font-semibold text-white">{agent.agent}</div>
+
+      <div className="min-h-0 overflow-auto rounded-[18px] border border-white/10 bg-black/[0.18]">
+        <table className="min-w-full text-left text-sm">
+          <thead className="sticky top-0 bg-[rgba(8,11,16,0.96)] text-[10px] uppercase tracking-[0.2em] text-slate-500">
+            <tr>
+              <th className="px-4 py-3">Agent</th>
+              <th className="px-4 py-3">Capital</th>
+              <th className="px-4 py-3">Cash</th>
+              <th className="px-4 py-3">Deployed</th>
+              <th className="px-4 py-3">Share</th>
+              <th className="px-4 py-3">P&L</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3 text-right">Control</th>
+            </tr>
+          </thead>
+          <tbody>
+            {allocations.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-4 py-6 text-center text-sm text-slate-400">
+                  Agent allocations will populate when the trading session starts.
+                </td>
+              </tr>
+            ) : (
+              allocations.map((agent) => {
+                const pnl = agent.realized_pnl + agent.unrealized_pnl;
+                const paused = pausedAgents.includes(agent.agent);
+                return (
+                  <tr key={agent.agent} className="border-t border-white/6">
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-slate-50">{agent.agent}</div>
+                      <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">{agent.last_decision}</div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-200">{formatCompactCurrency(agent.capital)}</td>
+                    <td className="px-4 py-3 text-slate-300">{formatCompactCurrency(agent.cash)}</td>
+                    <td className="px-4 py-3 text-slate-300">{formatCompactCurrency(agent.deployed)}</td>
+                    <td className="px-4 py-3 text-slate-300">{(agent.share_pct * 100).toFixed(1)}%</td>
+                    <td className={`px-4 py-3 font-medium ${pnl >= 0 ? "text-emerald-200" : "text-rose-200"}`}>{formatSignedCurrency(pnl)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${statusClasses(agent.status)}`}>
+                        {agent.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => void onToggleAgent(agent.agent, !paused)}
+                        className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200 transition hover:bg-white/[0.08]"
+                      >
+                        {paused ? "Resume" : "Pause"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ConversationPanel({ activity, coordination }: { activity: ActivityEvent[]; coordination: string }) {
+  return (
+    <section className={`${PANEL} flex min-h-0 flex-col p-4`}>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.34em] text-orange-300/80">Agent Dialogue</div>
+          <h2 className="mt-2 text-xl font-semibold text-slate-50">Agents discussing trades live</h2>
+        </div>
+        <div className="rounded-full bg-white/[0.06] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">Runtime feed</div>
+      </div>
+
+      <div className="mb-4 rounded-[18px] border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3 text-sm leading-6 text-slate-200">
+        {coordination || "The committee is standing by for the next market update."}
+      </div>
+
+      <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+        {activity.length === 0 ? (
+          <div className="rounded-[18px] border border-dashed border-white/10 bg-black/[0.18] p-4 text-sm text-slate-400">
+            Committee votes, pushback, treasury reallocations, and executions will stream here during the run.
+          </div>
+        ) : (
+          activity.map((event) => (
+            <article key={event.id} className="rounded-[20px] border border-white/10 bg-black/[0.18] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] ${agentBadgeClasses(event.agent)}`}>
+                    {event.agent || "System"}
+                  </span>
+                  {event.target_agent ? (
+                    <span className="rounded-full bg-white/[0.06] px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-300">
+                      to {event.target_agent}
+                    </span>
+                  ) : null}
+                  <span className="rounded-full bg-white/[0.06] px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+                    {event.kind}
+                  </span>
                 </div>
-                <button
-                  onClick={() => void onToggleAgent(agent.agent, !paused)}
-                  className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] ${
-                    paused ? "bg-red-500/20 text-red-200" : "bg-white/8 text-white/70"
-                  }`}
-                >
-                  {paused ? "Resume" : "Pause"}
-                </button>
+                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{event.time}</div>
               </div>
-              <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="rounded-xl bg-black/20 p-2 text-white/65">PnL {formatCurrency(score)}</div>
-                <div className="rounded-xl bg-black/20 p-2 text-white/65">Win rate {(agent.win_rate * 100).toFixed(0)}%</div>
-                <div className="rounded-xl bg-black/20 p-2 text-white/65">Deployed {formatCurrency(agent.deployed)}</div>
-                <div className="rounded-xl bg-black/20 p-2 text-white/65">Last {agent.last_decision}</div>
+
+              <div className="mt-3 text-sm font-semibold uppercase tracking-[0.14em] text-slate-400">{event.headline}</div>
+              <p className="mt-2 text-[15px] leading-7 text-slate-100">{event.message}</p>
+
+              <div className="mt-4 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                {event.asset ? <span className="rounded-full bg-white/[0.06] px-3 py-1">{event.asset}</span> : null}
+                {typeof event.amount === "number" ? <span className="rounded-full bg-white/[0.06] px-3 py-1">{formatCompactCurrency(event.amount)}</span> : null}
+                {typeof event.confidence === "number" ? (
+                  <span className="rounded-full bg-white/[0.06] px-3 py-1">{(event.confidence * 100).toFixed(0)}% confidence</span>
+                ) : null}
               </div>
+            </article>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function NewsPanel({ news, marketData }: { news: NewsItem[]; marketData: MarketState }) {
+  const priceRows = Object.entries(marketData.prices).slice(0, 5);
+
+  return (
+    <section className={`${PANEL} flex min-h-0 flex-col p-4`}>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.34em] text-orange-300/80">Live News Desk</div>
+          <h2 className="mt-2 text-xl font-semibold text-slate-50">Gemini-ranked market headlines</h2>
+        </div>
+        <div className="rounded-full bg-teal-400/[0.1] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-teal-100">Live tape</div>
+      </div>
+
+      <div className="mb-4 grid grid-cols-2 gap-2 xl:grid-cols-5">
+        {priceRows.map(([asset, price]) => {
+          const change = marketData.changes[asset] ?? 0;
+          return (
+            <div key={asset} className="rounded-[16px] border border-white/10 bg-black/[0.18] px-3 py-2.5">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{asset}</div>
+              <div className="mt-1 text-sm font-semibold text-slate-50">{formatCompactCurrency(price)}</div>
+              <div className={`mt-1 text-xs ${change >= 0 ? "text-emerald-200" : "text-rose-200"}`}>{formatPercent(change)}</div>
             </div>
           );
         })}
       </div>
-    </div>
-  );
-}
 
-function TradeCard({ trade }: { trade: Trade }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <div className="text-xs uppercase tracking-[0.22em] text-white/35">{trade.agent}</div>
-          <div className="text-lg font-semibold text-white">
-            {trade.action} {trade.asset}
-          </div>
-        </div>
-        <div
-          className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${
-            trade.committee_approved ? "bg-emerald-400/15 text-emerald-200" : "bg-red-500/15 text-red-200"
-          }`}
-        >
-          {trade.committee_approved ? "Approved" : "Rejected"}
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-2 text-sm text-white/65">
-        <div className="rounded-xl bg-black/20 p-2">Size {formatCurrency(trade.amount)}</div>
-        <div className="rounded-xl bg-black/20 p-2">Confidence {(trade.confidence * 100).toFixed(0)}%</div>
-        <div className="rounded-xl bg-black/20 p-2">Catalyst {trade.catalyst || "Price action"}</div>
-        <div className="rounded-xl bg-black/20 p-2">Expected move {trade.expected_move || "n/a"}</div>
-      </div>
-      <div className="mt-3 text-sm text-white/78">{trade.thesis || trade.reasoning}</div>
-    </div>
-  );
-}
-
-function ThemeExposureMap({ exposures }: { exposures: ThemeExposure[] }) {
-  if (!exposures.length) {
-    return <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-4 text-sm text-white/45">Theme exposures appear once the fund takes risk.</div>;
-  }
-
-  return (
-    <div className="space-y-3">
-      {exposures.map((exposure, index) => (
-        <div key={exposure.theme} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-white">{exposure.theme}</div>
-              <div className="text-xs uppercase tracking-[0.2em] text-white/35">Theme sleeve #{index + 1}</div>
-            </div>
-            <div className="text-right">
-              <div className="text-sm font-semibold text-white">{formatPercent(exposure.weight)}</div>
-              <div className="text-xs text-white/40">{formatCurrency(exposure.value)}</div>
-            </div>
-          </div>
-          <div className="h-2 overflow-hidden rounded-full bg-white/8">
-            <div
-              className="h-full rounded-full bg-[linear-gradient(90deg,#4DD6C0,#FF6B3D)]"
-              style={{ width: `${Math.min(exposure.weight * 100, 100)}%` }}
-            />
-          </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {Object.entries(exposure.assets).map(([asset, value]) => (
-              <div key={`${exposure.theme}-${asset}`} className="rounded-xl bg-black/20 p-2 text-sm text-white/62">
-                {asset} {formatCurrency(value)}
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function FactorExposureMap({ exposures }: { exposures: FactorExposure[] }) {
-  if (!exposures.length) {
-    return <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-4 text-sm text-white/45">Factor exposures appear after positions are established.</div>;
-  }
-
-  return (
-    <div className="grid gap-3">
-      {exposures.map((exposure) => (
-        <div key={exposure.factor} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-sm font-semibold text-white">{exposure.factor}</div>
-            <div className="text-sm text-white/60">{formatPercent(exposure.weight)}</div>
-          </div>
-          <div className="h-2 overflow-hidden rounded-full bg-white/8">
-            <div
-              className="h-full rounded-full bg-[linear-gradient(90deg,#89A6FB,#4DD6C0)]"
-              style={{ width: `${Math.min(exposure.weight * 100, 100)}%` }}
-            />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function BacktestLabCard({ lab }: { lab: BacktestLab | null }) {
-  if (!lab) {
-    return <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-4 text-sm text-white/45">Backtest lab is loading.</div>;
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-          Beat rate <span className="font-semibold text-white">{formatPercent(lab.beat_rate)}</span>
-        </div>
-        <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-          Avg alpha <span className="font-semibold text-white">{formatPercent(lab.average_alpha_pct)}</span>
-        </div>
-        <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-          Best run <span className="font-semibold text-white">{lab.best_run?.scenario_title ?? "n/a"}</span>
-        </div>
-      </div>
-      <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-sm text-white/62">{lab.summary}</div>
-      <div className="max-h-[320px] overflow-y-auto rounded-2xl border border-white/8 bg-white/[0.03]">
-        <table className="w-full text-left text-sm">
-          <thead className="sticky top-0 bg-[#111827] text-white/45">
+      <div className="min-h-0 overflow-auto rounded-[18px] border border-white/10 bg-black/[0.18]">
+        <table className="min-w-full text-left text-sm">
+          <thead className="sticky top-0 bg-[rgba(8,11,16,0.96)] text-[10px] uppercase tracking-[0.2em] text-slate-500">
             <tr>
-              <th className="px-4 py-3 font-medium">Scenario</th>
-              <th className="px-4 py-3 font-medium">Risk</th>
-              <th className="px-4 py-3 font-medium">Return</th>
-              <th className="px-4 py-3 font-medium">Alpha</th>
-              <th className="px-4 py-3 font-medium">Drawdown</th>
+              <th className="px-4 py-3">Time</th>
+              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Headline</th>
+              <th className="px-4 py-3">Assets</th>
+              <th className="px-4 py-3">Sentiment</th>
+              <th className="px-4 py-3">Impact</th>
             </tr>
           </thead>
           <tbody>
-            {lab.runs.map((run, index) => (
-              <tr key={`${run.scenario_id}-${run.risk}`} className={index % 2 === 0 ? "bg-black/10" : ""}>
-                <td className="px-4 py-3 text-white/70">{run.scenario_title}</td>
-                <td className="px-4 py-3 uppercase text-white/55">{run.risk}</td>
-                <td className="px-4 py-3 text-white/70">{formatPercent(run.return_pct)}</td>
-                <td className={run.alpha_pct >= 0 ? "px-4 py-3 text-emerald-200" : "px-4 py-3 text-red-200"}>
-                  {formatPercent(run.alpha_pct)}
+            {news.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-400">
+                  Live headlines will appear here when the backend starts streaming them.
                 </td>
-                <td className="px-4 py-3 text-white/60">{formatPercent(-Math.abs(run.max_drawdown_pct))}</td>
               </tr>
-            ))}
+            ) : (
+              news.map((item, index) => (
+                <tr key={`${item.title}-${index}`} className="border-t border-white/6 align-top">
+                  <td className="px-4 py-3 whitespace-nowrap text-slate-400">{formatShortTime(item.time)}</td>
+                  <td className="px-4 py-3 text-slate-300">{item.source}</td>
+                  <td className="px-4 py-3">
+                    <div className="max-w-[28rem] leading-6 text-slate-100">{item.title}</div>
+                    <div className="mt-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.category}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      {(item.assets?.length ? item.assets : ["MARKET"]).map((asset) => (
+                        <span key={`${item.title}-${asset}`} className="rounded-full bg-white/[0.06] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
+                          {asset}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className={`px-4 py-3 font-medium ${sentimentClasses(item.sentiment)}`}>{item.sentiment}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-2 w-24 overflow-hidden rounded-full bg-white/[0.08]">
+                        <div
+                          className="h-full rounded-full bg-[linear-gradient(90deg,#38bdf8,#2dd4bf,#fb923c)]"
+                          style={{ width: `${(item.impact_score ?? 0) * 100}%` }}
+                        />
+                      </div>
+                      <span className="text-slate-300">{Math.round((item.impact_score ?? 0) * 100)}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -305,23 +391,16 @@ export default function Dashboard() {
   const {
     isConnected,
     portfolio,
-    trades,
-    reasonings,
-    news,
     marketData,
     sessionActive,
     coordination,
-    benchmarkState,
-    benchmarkHistory,
-    committeeVotes,
-    leaderboard,
-    riskEvents,
-    constructionState,
-    researchBrief,
-    backtestLab,
+    allocations,
+    projectionHistory,
+    latestProjection,
+    activity,
+    news,
     controlState,
     scenarios,
-    sessionSummary,
     startSession,
     applyScenario,
     setOverride,
@@ -330,575 +409,149 @@ export default function Dashboard() {
 
   const [capital, setCapital] = useState(10000);
   const [risk, setRisk] = useState("medium");
-  const [duration, setDuration] = useState(60);
   const [selectedScenario, setSelectedScenario] = useState("");
   const [error, setError] = useState("");
+
+  const deferredActivity = useDeferredValue(activity);
+  const deferredNews = useDeferredValue(news);
   const activeScenario = selectedScenario || scenarios[0]?.id || "";
-
-  const totalBenchmarkCards = useMemo(() => {
-    return Object.entries(benchmarkState.returns).map(([name, value]) => ({
-      name,
-      value,
-      benchmarkValue: benchmarkState.values[name] ?? 0,
-    }));
-  }, [benchmarkState]);
-
   const navValue = portfolio?.total_value ?? capital;
   const totalReturn = portfolio?.total_return_pct ?? 0;
-  const themeExposures = portfolio?.theme_exposures ?? [];
-  const factorExposures = portfolio?.factor_exposures ?? [];
+
+  const sessionLabel = useMemo(() => {
+    if (!isConnected) {
+      return "Backend offline";
+    }
+    return sessionActive ? "Session running" : "Ready";
+  }, [isConnected, sessionActive]);
+
+  const conversationFeed = useMemo(
+    () => deferredActivity.filter((item) => item.kind !== "news").slice(0, 40),
+    [deferredActivity],
+  );
 
   const handleStart = async () => {
     try {
       setError("");
-      await startSession(capital, risk, duration, activeScenario);
+      await startSession(capital, risk, SESSION_DURATION_SECONDS, activeScenario);
     } catch (err) {
-      setError("Could not start a new session.");
+      setError("Could not start the session.");
       console.error(err);
     }
   };
 
-  const handleScenarioApply = async (scenarioId: string) => {
+  const handleScenarioApply = async () => {
+    if (!activeScenario) {
+      return;
+    }
+
     try {
       setError("");
-      await applyScenario(scenarioId);
-      setSelectedScenario(scenarioId);
+      await applyScenario(activeScenario);
+      setSelectedScenario(activeScenario);
     } catch (err) {
       setError("Scenario injection failed.");
       console.error(err);
     }
   };
 
-  const benchmarkWinner = totalBenchmarkCards.reduce(
-    (best, next) => (next.value > best.value ? next : best),
-    { name: "Fund", value: totalReturn, benchmarkValue: navValue },
-  );
-
   return (
     <div
-      className="min-h-screen bg-[#071018] px-4 py-5 text-white sm:px-6 lg:px-8"
+      className="min-h-[100dvh] bg-[#05070b] px-4 py-4 text-slate-100 sm:px-5"
       style={{
         backgroundImage:
-          "radial-gradient(circle at 20% 10%, rgba(255,107,61,0.18), transparent 28%), radial-gradient(circle at 80% 0%, rgba(77,214,192,0.12), transparent 24%), linear-gradient(180deg, #0b1220 0%, #071018 50%, #05070d 100%)",
+          "radial-gradient(circle at 10% 0%, rgba(251,146,60,0.14), transparent 28%), radial-gradient(circle at 100% 10%, rgba(45,212,191,0.1), transparent 24%), linear-gradient(180deg, #090d14 0%, #05070b 100%)",
       }}
     >
-      <div className="mx-auto flex max-w-[1600px] flex-col gap-5">
-        <div className={`${PANEL} overflow-hidden p-5 sm:p-6`}>
-          <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
-            <div className="space-y-4">
-              <div className="inline-flex items-center gap-3 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2">
-                <span className={`h-2.5 w-2.5 rounded-full ${isConnected ? "bg-emerald-300" : "bg-red-400"}`} />
-                <span className="text-xs uppercase tracking-[0.32em] text-white/55">
-                  {isConnected ? "Live feed online" : "Backend offline"}
-                </span>
-              </div>
-              <div>
-                <div className="text-xs uppercase tracking-[0.32em] text-white/40">Autonomous Multi-Agent Fund</div>
-                <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">TradeAgent Command Deck</h1>
-              </div>
-              <div className="max-w-3xl text-sm text-white/68 sm:text-base">{coordination || "Ready for scenario-driven autonomous trading."}</div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2 xl:min-w-[540px] xl:grid-cols-4">
-              <label className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm">
-                <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/40">Capital</div>
-                <input
-                  type="number"
-                  value={capital}
-                  onChange={(e) => setCapital(Number(e.target.value))}
-                  className="w-full bg-transparent text-lg font-semibold outline-none"
-                />
-              </label>
-              <label className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm">
-                <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/40">Risk</div>
-                <select value={risk} onChange={(e) => setRisk(e.target.value)} className="w-full bg-transparent text-lg font-semibold outline-none">
-                  <option className="bg-slate-900" value="low">
-                    Low
-                  </option>
-                  <option className="bg-slate-900" value="medium">
-                    Medium
-                  </option>
-                  <option className="bg-slate-900" value="high">
-                    High
-                  </option>
-                </select>
-              </label>
-              <label className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm">
-                <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/40">Duration</div>
-                <input
-                  type="number"
-                  value={duration}
-                  onChange={(e) => setDuration(Number(e.target.value))}
-                  className="w-full bg-transparent text-lg font-semibold outline-none"
-                />
-              </label>
-              <label className="rounded-2xl border border-white/10 bg-black/20 p-3 text-sm">
-                <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-white/40">Scenario</div>
-                <select
-                  value={activeScenario}
-                  onChange={(e) => setSelectedScenario(e.target.value)}
-                  className="w-full bg-transparent text-sm font-semibold outline-none"
-                >
-                  {scenarios.map((scenario) => (
-                    <option key={scenario.id} value={scenario.id} className="bg-slate-900">
-                      {scenario.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
+      <div className="mx-auto flex min-h-[calc(100dvh-2rem)] max-w-[1960px] flex-col gap-3">
+        <header className={`${PANEL} grid gap-3 px-4 py-3 xl:grid-cols-[minmax(0,1fr),auto] xl:items-center`}>
+          <div className="flex min-w-0 flex-wrap items-center gap-3 overflow-hidden">
+            <div className={`h-2.5 w-2.5 rounded-full ${isConnected ? "bg-emerald-400" : "bg-rose-400"}`} />
+            <div className="text-[11px] font-medium uppercase tracking-[0.34em] text-slate-500">AI Hedge Fund Terminal</div>
+            <div className="hidden h-4 w-px bg-white/[0.08] xl:block" />
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
+              <span>{sessionLabel}</span>
+              <span className="text-slate-600">NAV {formatCompactCurrency(navValue)}</span>
+              <span className={totalReturn >= 0 ? "text-emerald-200" : "text-rose-200"}>{formatPercent(totalReturn)}</span>
+              {error ? <span className="text-rose-200">{error}</span> : null}
             </div>
           </div>
 
-          <div className="mt-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-            <div className="grid gap-3 sm:grid-cols-3 xl:w-[560px]">
-              <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-white/40">NAV</div>
-                <div className="mt-2 text-3xl font-semibold">{formatCurrency(navValue)}</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-white/40">Fund Return</div>
-                <div className={`mt-2 text-3xl font-semibold ${totalReturn >= 0 ? "text-emerald-200" : "text-red-200"}`}>
-                  {formatPercent(totalReturn)}
-                </div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-white/40">Best Benchmark</div>
-                <div className="mt-2 text-3xl font-semibold">{benchmarkWinner.name}</div>
-              </div>
+          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-[96px,86px,86px,160px,88px,92px,92px]">
+            <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Capital</div>
+              <input
+                type="number"
+                value={capital}
+                onChange={(event) => setCapital(Number(event.target.value))}
+                className="mt-1 w-full bg-transparent text-[11px] font-semibold outline-none"
+              />
+            </label>
+            <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Risk</div>
+              <select value={risk} onChange={(event) => setRisk(event.target.value)} className="mt-1 w-full bg-transparent text-[11px] font-semibold outline-none">
+                <option className="bg-slate-900" value="low">Low</option>
+                <option className="bg-slate-900" value="medium">Medium</option>
+                <option className="bg-slate-900" value="high">High</option>
+              </select>
+            </label>
+            <div className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Run Time</div>
+              <div className="mt-1 text-[11px] font-semibold text-slate-100">{SESSION_DURATION_SECONDS}s fixed</div>
             </div>
-
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <button
-                onClick={() => void handleScenarioApply(activeScenario)}
-                disabled={!activeScenario}
-                className="rounded-full border border-[#4DD6C0]/40 bg-[#4DD6C0]/12 px-5 py-3 text-sm font-semibold uppercase tracking-[0.24em] text-[#d5fff8]"
+            <label className="rounded-[14px] border border-white/10 bg-black/[0.18] px-3 py-2 sm:col-span-2 xl:col-span-1">
+              <div className="text-[9px] uppercase tracking-[0.16em] text-slate-500">Scenario</div>
+              <select
+                value={activeScenario}
+                onChange={(event) => setSelectedScenario(event.target.value)}
+                className="mt-1 w-full bg-transparent text-[11px] font-semibold outline-none"
               >
-                Inject Scenario
-              </button>
-              <button
-                onClick={() => void setOverride(!controlState.override_active)}
-                className={`rounded-full px-5 py-3 text-sm font-semibold uppercase tracking-[0.24em] ${
-                  controlState.override_active
-                    ? "border border-red-300/40 bg-red-500/18 text-red-100"
-                    : "border border-white/10 bg-white/[0.05] text-white/70"
-                }`}
-              >
-                {controlState.override_active ? "Override On" : "PM Override"}
-              </button>
-              <button
-                onClick={() => void handleStart()}
-                disabled={!isConnected || sessionActive}
-                className="rounded-full bg-[#FF6B3D] px-6 py-3 text-sm font-semibold uppercase tracking-[0.24em] text-black disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {sessionActive ? "Session Running" : "Start Session"}
-              </button>
-            </div>
-          </div>
-
-          {error ? <div className="mt-4 text-sm text-red-200">{error}</div> : null}
-        </div>
-
-        <div className="grid gap-5 xl:grid-cols-[1.1fr,1.4fr,1fr]">
-          <div className="flex flex-col gap-5">
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Benchmark Race</div>
-                  <div className="text-lg font-semibold">Fund vs passive</div>
-                </div>
-              </div>
-              <div className="h-64 overflow-hidden rounded-[24px] border border-white/8 bg-black/20 p-2">
-                <PerformanceChart history={benchmarkHistory} benchmarkState={benchmarkState} />
-              </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">Fund {formatPercent(totalReturn)}</div>
-                {totalBenchmarkCards.map((card) => (
-                  <div key={card.name} className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-                    {card.name} {formatPercent(card.value)}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Research Desk</div>
-                  <div className="text-lg font-semibold">Regime and thesis memo</div>
-                </div>
-              </div>
-              <div className="space-y-3">
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-white/35">Regime</div>
-                  <div className="mt-2 text-2xl font-semibold text-white">{researchBrief.regime}</div>
-                  <div className="mt-2 text-sm text-white/62">{researchBrief.summary}</div>
-                </div>
-                <div className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">
-                  Primary risk: <span className="text-white">{researchBrief.primary_risk}</span>
-                </div>
-                <div className="grid gap-3">
-                  <div className="rounded-2xl bg-black/20 p-4">
-                    <div className="mb-2 text-xs uppercase tracking-[0.2em] text-white/35">Opportunities</div>
-                    <div className="space-y-2">
-                      {researchBrief.opportunities.map((item, index) => (
-                        <div key={`${item}-${index}`} className="text-sm text-white/65">{item}</div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-4">
-                    <div className="mb-2 text-xs uppercase tracking-[0.2em] text-white/35">Watchlist</div>
-                    <div className="flex flex-wrap gap-2">
-                      {researchBrief.watchlist.map((asset) => (
-                        <span key={asset} className="rounded-full bg-white/8 px-3 py-1 text-xs uppercase tracking-[0.2em] text-white/72">
-                          {asset}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Theme Exposure Map</div>
-                  <div className="text-lg font-semibold">Portfolio by macro sleeve</div>
-                </div>
-              </div>
-              <ThemeExposureMap exposures={themeExposures} />
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Factor Exposure Model</div>
-                  <div className="text-lg font-semibold">Style and beta decomposition</div>
-                </div>
-              </div>
-              <FactorExposureMap exposures={factorExposures} />
-            </div>
-
-            <LeaderboardCard
-              leaderboard={leaderboard}
-              pausedAgents={controlState.paused_agents}
-              onToggleAgent={setAgentPaused}
-            />
-          </div>
-
-          <div className="flex flex-col gap-5">
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Portfolio Construction</div>
-                  <div className="text-lg font-semibold">Overlay and crowding control</div>
-                </div>
-              </div>
-              <div className="space-y-3">
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-                    Status <span className="font-semibold text-white">{constructionState.status}</span>
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-                    Dominant <span className="font-semibold text-white">{constructionState.dominant_theme ?? "None"}</span>
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/65">
-                    Cash buffer <span className="font-semibold text-white">{formatPercent(constructionState.cash_buffer_weight)}</span>
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="mb-2 text-xs uppercase tracking-[0.2em] text-white/35">Concentration score</div>
-                  <div className="text-3xl font-semibold text-white">{constructionState.concentration_score.toFixed(2)}</div>
-                  <div className="mt-2 text-sm text-white/55">Lower is more diversified. The overlay trims the book when a theme crowds out the rest of the fund.</div>
-                </div>
-                <div className="space-y-2">
-                  {constructionState.actions.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-4 text-sm text-white/45">
-                      No construction actions yet. The overlay will log trims and blocked crowding here.
-                    </div>
-                  ) : (
-                    constructionState.actions.map((action, index) => (
-                      <div key={`${action.type}-${action.asset}-${index}`} className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">
-                        {action.message}
-                        {action.amount > 0 ? ` (${formatCurrency(action.amount)})` : ""}
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="space-y-2">
-                  {constructionState.notes.map((note, index) => (
-                    <div key={`${note}-${index}`} className="rounded-xl bg-white/[0.03] p-3 text-sm text-white/55">
-                      {note}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Investment Committee</div>
-                  <div className="text-lg font-semibold">Large-trade voting board</div>
-                </div>
-              </div>
-              <div className="space-y-3">
-                {committeeVotes.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-5 text-sm text-white/45">
-                    Large proposals will appear here with each agent vote and consensus score.
-                  </div>
-                ) : (
-                  committeeVotes.map((vote, index) => (
-                    <div key={`${vote.proposal_agent}-${index}`} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                      <div className="mb-3 flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-xs uppercase tracking-[0.22em] text-white/35">{vote.proposal_agent} proposal</div>
-                          <div className="text-lg font-semibold text-white">
-                            {vote.proposal.action} {vote.proposal.asset} {formatCurrency(vote.proposal.amount)}
-                          </div>
-                        </div>
-                        <div
-                          className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${
-                            vote.approved ? "bg-emerald-400/15 text-emerald-100" : "bg-red-500/15 text-red-100"
-                          }`}
-                        >
-                          {vote.approved ? "Approved" : "Rejected"}
-                        </div>
-                      </div>
-                      <div className="mb-3 text-sm text-white/60">Consensus {(vote.consensus * 100).toFixed(0)}%</div>
-                      <div className="grid gap-2 sm:grid-cols-3">
-                        {vote.votes.map((record) => (
-                          <div key={`${vote.proposal_agent}-${record.agent}`} className="rounded-xl bg-black/20 p-3">
-                            <div className="flex items-center justify-between">
-                              <div className="text-sm font-semibold text-white">{record.agent}</div>
-                              <div className={record.vote === "YES" ? "text-emerald-200" : "text-red-200"}>{record.vote}</div>
-                            </div>
-                            <div className="mt-2 text-xs leading-5 text-white/55">{record.reasoning}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Reasoning Stream</div>
-                  <div className="text-lg font-semibold">Why the agents are acting</div>
-                </div>
-              </div>
-              <div className="max-h-[460px] space-y-3 overflow-y-auto pr-1">
-                {reasonings.map((entry, index) => (
-                  <div key={`${entry.agent}-${index}`} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                    <div className="mb-2 flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-white">{entry.agent}</div>
-                      <div className="rounded-full bg-black/20 px-3 py-1 text-xs uppercase tracking-[0.2em] text-white/55">
-                        {entry.decision.action}
-                      </div>
-                    </div>
-                    <div className="text-sm text-white/72">{entry.reasoning}</div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                      <div className="rounded-xl bg-black/20 p-2 text-sm text-white/62">Asset {entry.decision.asset}</div>
-                      <div className="rounded-xl bg-black/20 p-2 text-sm text-white/62">
-                        Size {formatCurrency(entry.decision.amount)}
-                      </div>
-                      <div className="rounded-xl bg-black/20 p-2 text-sm text-white/62">
-                        Conviction {(entry.decision.confidence * 100).toFixed(0)}%
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-5">
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Scenario Deck</div>
-                  <div className="text-lg font-semibold">Demo triggers</div>
-                </div>
-              </div>
-              <div className="space-y-3">
                 {scenarios.map((scenario) => (
-                  <button
-                    key={scenario.id}
-                    onClick={() => void handleScenarioApply(scenario.id)}
-                    className={`w-full rounded-2xl border p-4 text-left transition ${
-                      selectedScenario === scenario.id
-                        ? "border-[#FF6B3D]/50 bg-[#FF6B3D]/12"
-                        : "border-white/8 bg-white/[0.03]"
-                    }`}
-                  >
-                    <div className="text-sm font-semibold text-white">{scenario.title}</div>
-                    <div className="mt-1 text-sm text-white/58">{scenario.description}</div>
-                  </button>
+                  <option key={scenario.id} value={scenario.id} className="bg-slate-900">
+                    {scenario.title}
+                  </option>
                 ))}
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Risk Radar</div>
-                  <div className="text-lg font-semibold">Guardrails in motion</div>
-                </div>
-              </div>
-              <div className="space-y-3">
-                {riskEvents.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-4 text-sm text-white/45">
-                    No risk alerts yet. The engine will surface stop-losses, vetoes, and kill-switch events here.
-                  </div>
-                ) : (
-                  riskEvents.map((event, index) => (
-                    <div key={`${event.time}-${index}`} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-white">{event.time || "now"}</div>
-                        <div
-                          className={`rounded-full px-3 py-1 text-xs uppercase tracking-[0.2em] ${
-                            event.severity === "high" ? "bg-red-500/15 text-red-100" : "bg-amber-500/15 text-amber-100"
-                          }`}
-                        >
-                          {event.severity}
-                        </div>
-                      </div>
-                      <div className="mt-2 text-sm text-white/62">{event.message}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className={`${PANEL} p-5`}>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.24em] text-white/40">Market + News</div>
-                  <div className="text-lg font-semibold">Live narrative tape</div>
-                </div>
-              </div>
-              <div className="grid gap-4 lg:grid-cols-1">
-                <div className="space-y-2">
-                  {Object.entries(marketData.prices).map(([asset, price]) => {
-                    const change = marketData.changes[asset] ?? 0;
-                    return (
-                      <div key={asset} className="flex items-center justify-between rounded-2xl bg-black/20 p-3">
-                        <div>
-                          <div className="text-sm font-semibold text-white">{asset}</div>
-                          <div className="text-xs uppercase tracking-[0.2em] text-white/35">Live tape</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-semibold text-white">{formatCurrency(price)}</div>
-                          <div className={change >= 0 ? "text-emerald-200" : "text-red-200"}>{formatPercent(change)}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="space-y-2">
-                  {news.map((item, index) => (
-                    <div key={`${item.title}-${index}`} className="rounded-2xl bg-black/20 p-3">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/35">{item.time || "headline"}</div>
-                      <div className="mt-1 text-sm text-white/68">{item.title}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+              </select>
+            </label>
+            <button
+              onClick={() => void handleScenarioApply()}
+              className="rounded-[14px] border border-white/10 bg-white/[0.05] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-100 transition hover:bg-white/[0.08]"
+            >
+              Inject
+            </button>
+            <button
+              onClick={() => void setOverride(!controlState.override_active)}
+              className={`rounded-[14px] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] transition ${
+                controlState.override_active
+                  ? "bg-rose-500/[0.16] text-rose-100 ring-1 ring-rose-300/20"
+                  : "border border-white/10 bg-white/[0.05] text-slate-300 hover:bg-white/[0.08]"
+              }`}
+            >
+              Override
+            </button>
+            <button
+              onClick={() => void handleStart()}
+              disabled={!isConnected || sessionActive}
+              className="rounded-[14px] bg-[#f59e0b] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-black transition hover:bg-[#f0a11d] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {sessionActive ? "Running" : "Start"}
+            </button>
           </div>
-        </div>
+        </header>
 
-        <div className="grid gap-5 xl:grid-cols-[1.2fr,1fr]">
-          <div className={`${PANEL} p-5`}>
-            <div className="mb-5">
-              <div className="text-xs uppercase tracking-[0.24em] text-white/40">Backtest Lab</div>
-              <div className="text-lg font-semibold">Scenario and risk-mandate matrix</div>
-            </div>
-            <BacktestLabCard lab={backtestLab} />
+        <main className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[1.15fr,0.95fr,1.1fr]">
+          <div className="grid min-h-0 gap-3 xl:grid-rows-[1.05fr,0.95fr]">
+            <PnlPanel
+              projectionHistory={projectionHistory}
+              latestProjection={latestProjection}
+              portfolioValue={navValue}
+              totalReturn={totalReturn}
+            />
+            <AllocationTable allocations={allocations} pausedAgents={controlState.paused_agents} onToggleAgent={setAgentPaused} />
           </div>
-
-          <div className={`${PANEL} p-5`}>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-[0.24em] text-white/40">Execution Ledger</div>
-                <div className="text-lg font-semibold">Trade evidence cards</div>
-              </div>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              {trades.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-5 text-sm text-white/45">
-                  Executed trades will populate here with thesis, catalyst, and approval state.
-                </div>
-              ) : (
-                trades.slice(0, 8).map((trade) => <TradeCard key={trade.id} trade={trade} />)
-              )}
-            </div>
-          </div>
-
-          <div className={`${PANEL} p-5`}>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-[0.24em] text-white/40">Portfolio Snapshot</div>
-                <div className="text-lg font-semibold">Fund state</div>
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">Cash {formatCurrency(portfolio?.cash ?? 0)}</div>
-              <div className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">
-                Realized {formatCurrency(portfolio?.realized_pnl ?? 0)}
-              </div>
-              <div className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">
-                Unrealized {formatCurrency(portfolio?.unrealized_pnl ?? 0)}
-              </div>
-              <div className="rounded-2xl bg-black/20 p-4 text-sm text-white/68">
-                Active scenario {controlState.active_scenario ?? "none"}
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              {(portfolio?.positions ?? []).map((position) => (
-                <div key={position.asset} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="text-sm font-semibold text-white">{position.asset}</div>
-                    <div className={position.unrealized_pnl >= 0 ? "text-emerald-200" : "text-red-200"}>
-                      {formatCurrency(position.unrealized_pnl)}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-sm text-white/62">
-                    <div className="rounded-xl bg-black/20 p-2">Qty {position.quantity.toFixed(3)}</div>
-                    <div className="rounded-xl bg-black/20 p-2">Avg {formatCurrency(position.average_cost)}</div>
-                    <div className="rounded-xl bg-black/20 p-2">Last {formatCurrency(position.current_price)}</div>
-                    <div className="rounded-xl bg-black/20 p-2">Weight {(position.weight * 100).toFixed(1)}%</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {sessionSummary ? (
-              <div className="mt-5 rounded-[24px] border border-[#4DD6C0]/25 bg-[#4DD6C0]/8 p-5">
-                <div className="text-xs uppercase tracking-[0.24em] text-[#d9fff7]/65">Session Summary</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{sessionSummary.headline}</div>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/70">
-                    Final NAV {formatCurrency(sessionSummary.total_value)}
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/70">
-                    Total return {formatPercent(sessionSummary.total_return_pct)}
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/70">
-                    Top agent {sessionSummary.top_agent ?? "n/a"}
-                  </div>
-                  <div className="rounded-2xl bg-black/20 p-3 text-sm text-white/70">
-                    Trades {sessionSummary.trade_count}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
+          <ConversationPanel activity={conversationFeed} coordination={coordination} />
+          <NewsPanel news={deferredNews} marketData={marketData as MarketState} />
+        </main>
       </div>
     </div>
   );
